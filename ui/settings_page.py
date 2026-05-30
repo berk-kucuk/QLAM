@@ -6,12 +6,14 @@ from PyQt6.QtCore import pyqtSignal, QSize, Qt
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QTextEdit, QMessageBox, QScrollArea,
-    QFrame, QSizePolicy, QLineEdit,
+    QFrame, QSizePolicy, QLineEdit, QComboBox, QTimeEdit,
 )
+from PyQt6.QtCore import QTime
 
 from core.database_manager import DatabaseManager
 
 SETTINGS_FILE = Path.home() / ".local" / "share" / "Qlam" / "settings.json"
+AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "qlam.desktop"
 
 DEFAULTS = {
     "max_file_size_mb": 100,
@@ -19,12 +21,18 @@ DEFAULTS = {
     "follow_symlinks": False,
     "recursive_scan": True,
     "auto_quarantine": True,
+    "realtime_enabled": False,
     "realtime_paths": [
         str(Path.home() / "Downloads"),
         str(Path.home() / "Desktop"),
         "/tmp",
     ],
     "notify_on_threat": True,
+    "autostart": False,
+    "scheduled_scan_enabled": False,
+    "scheduled_scan_type": "quick",
+    "scheduled_scan_trigger": "startup",
+    "scheduled_scan_time": "02:00",
 }
 
 _LABEL = "color: #a3a3a3; font-size: 13px;"
@@ -179,8 +187,81 @@ class SettingsPage(QWidget):
 
         root.addWidget(card2)
 
+        # ── Autostart card ────────────────────────────────────────────────
+        card_auto, c_auto = _section_card("System Startup", "fa5s.power-off")
+
+        self._autostart_chk = QCheckBox(
+            "Launch Qlam automatically when the system starts  (runs in system tray)"
+        )
+        self._autostart_chk.setStyleSheet(_LABEL)
+        c_auto.addWidget(self._autostart_chk)
+
+        root.addWidget(card_auto)
+
+        # ── Scheduled Scan card ───────────────────────────────────────────
+        card_sched, c_sched = _section_card("Scheduled Scan", "fa5s.calendar-alt")
+
+        self._sched_enabled_chk = QCheckBox("Enable scheduled automatic scan")
+        self._sched_enabled_chk.setStyleSheet(_LABEL)
+        self._sched_enabled_chk.toggled.connect(self._on_sched_toggled)
+        c_sched.addWidget(self._sched_enabled_chk)
+
+        # Scan type row
+        stype_row = QHBoxLayout()
+        stype_lbl = QLabel("Scan type:")
+        stype_lbl.setStyleSheet(_LABEL)
+        stype_lbl.setFixedWidth(120)
+        stype_row.addWidget(stype_lbl)
+        self._sched_type_combo = QComboBox()
+        self._sched_type_combo.addItems(["Quick Scan", "Full Scan"])
+        self._sched_type_combo.setFixedWidth(140)
+        stype_row.addWidget(self._sched_type_combo)
+        stype_row.addStretch()
+        c_sched.addLayout(stype_row)
+
+        # Trigger row
+        trig_row = QHBoxLayout()
+        trig_lbl = QLabel("Run:")
+        trig_lbl.setStyleSheet(_LABEL)
+        trig_lbl.setFixedWidth(120)
+        trig_row.addWidget(trig_lbl)
+        self._sched_trigger_combo = QComboBox()
+        self._sched_trigger_combo.addItems(["On system startup", "At a specific time"])
+        self._sched_trigger_combo.setFixedWidth(200)
+        self._sched_trigger_combo.currentIndexChanged.connect(self._on_trigger_changed)
+        trig_row.addWidget(self._sched_trigger_combo)
+        trig_row.addStretch()
+        c_sched.addLayout(trig_row)
+
+        # Time picker (only visible when "At a specific time" is selected)
+        time_row = QHBoxLayout()
+        time_lbl = QLabel("Time:")
+        time_lbl.setStyleSheet(_LABEL)
+        time_lbl.setFixedWidth(120)
+        time_row.addWidget(time_lbl)
+        self._sched_time_edit = QTimeEdit()
+        self._sched_time_edit.setDisplayFormat("HH:mm")
+        self._sched_time_edit.setFixedWidth(90)
+        self._sched_time_edit.setStyleSheet(
+            "QTimeEdit { background-color: #0c0c0c; border: 1px solid #262626;"
+            " border-radius: 6px; color: #fafafa; padding: 5px 8px; }"
+            "QTimeEdit::up-button, QTimeEdit::down-button { width: 0; }"
+        )
+        time_row.addWidget(self._sched_time_edit)
+        time_row.addStretch()
+        self._time_row_widget = QWidget()
+        self._time_row_widget.setLayout(time_row)
+        c_sched.addWidget(self._time_row_widget)
+
+        root.addWidget(card_sched)
+
         # ── Real-time Paths card ──────────────────────────────────────────
         card3, c3 = _section_card("Real-time Protection — Watched Paths", "fa5s.eye")
+
+        self._rt_enabled_chk = QCheckBox("Enable real-time protection")
+        self._rt_enabled_chk.setStyleSheet(_LABEL)
+        self._rt_enabled_chk.toggled.connect(self._on_rt_enabled_toggled)
+        c3.addWidget(self._rt_enabled_chk)
 
         hint = QLabel("One path per line. Qlam monitors these directories for new or modified files.")
         hint.setStyleSheet(_DIM)
@@ -266,8 +347,24 @@ class SettingsPage(QWidget):
         self._symlinks_chk.setChecked(s.get("follow_symlinks", False))
         self._recursive_chk.setChecked(s.get("recursive_scan", True))
         self._auto_quarantine_chk.setChecked(s.get("auto_quarantine", True))
-        self._rt_paths_edit.setPlainText("\n".join(s.get("realtime_paths", [])))
         self._notify_chk.setChecked(s.get("notify_on_threat", True))
+        self._autostart_chk.setChecked(s.get("autostart", False))
+        self._rt_enabled_chk.setChecked(s.get("realtime_enabled", False))
+        self._rt_paths_edit.setPlainText("\n".join(s.get("realtime_paths", [])))
+        self._on_rt_enabled_toggled(s.get("realtime_enabled", False))
+
+        enabled = s.get("scheduled_scan_enabled", False)
+        self._sched_enabled_chk.setChecked(enabled)
+        self._sched_type_combo.setCurrentIndex(
+            0 if s.get("scheduled_scan_type", "quick") == "quick" else 1
+        )
+        trigger = s.get("scheduled_scan_trigger", "startup")
+        self._sched_trigger_combo.setCurrentIndex(0 if trigger == "startup" else 1)
+        t = s.get("scheduled_scan_time", "02:00")
+        h, m = (int(x) for x in t.split(":"))
+        self._sched_time_edit.setTime(QTime(h, m))
+        self._on_sched_toggled(enabled)
+        self._on_trigger_changed(self._sched_trigger_combo.currentIndex())
 
     def _collect_from_ui(self) -> dict:
         paths = [
@@ -275,21 +372,66 @@ class SettingsPage(QWidget):
             for p in self._rt_paths_edit.toPlainText().splitlines()
             if p.strip()
         ]
+        trigger = "startup" if self._sched_trigger_combo.currentIndex() == 0 else "time"
+        t = self._sched_time_edit.time()
         return {
             "max_file_size_mb": self._max_size_spin.value(),
             "scan_archives": self._archives_chk.isChecked(),
             "follow_symlinks": self._symlinks_chk.isChecked(),
             "recursive_scan": self._recursive_chk.isChecked(),
             "auto_quarantine": self._auto_quarantine_chk.isChecked(),
+            "realtime_enabled": self._rt_enabled_chk.isChecked(),
             "realtime_paths": paths,
             "notify_on_threat": self._notify_chk.isChecked(),
+            "autostart": self._autostart_chk.isChecked(),
+            "scheduled_scan_enabled": self._sched_enabled_chk.isChecked(),
+            "scheduled_scan_type": "quick" if self._sched_type_combo.currentIndex() == 0 else "full",
+            "scheduled_scan_trigger": trigger,
+            "scheduled_scan_time": f"{t.hour():02d}:{t.minute():02d}",
         }
 
     def _save_and_emit(self):
         self._settings = self._collect_from_ui()
         self._persist()
+        self._apply_autostart(self._settings.get("autostart", False))
         self.settings_changed.emit(dict(self._settings))
         QMessageBox.information(self, "Qlam", "Settings saved.")
+
+    def _on_sched_toggled(self, enabled: bool):
+        for w in (self._sched_type_combo, self._sched_trigger_combo, self._time_row_widget):
+            w.setEnabled(enabled)
+        if enabled:
+            self._on_trigger_changed(self._sched_trigger_combo.currentIndex())
+
+    def _on_trigger_changed(self, index: int):
+        show_time = (index == 1) and self._sched_enabled_chk.isChecked()
+        self._time_row_widget.setVisible(show_time)
+
+    def _on_rt_enabled_toggled(self, enabled: bool):
+        self._rt_paths_edit.setEnabled(enabled)
+
+    @staticmethod
+    def _apply_autostart(enable: bool):
+        AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
+        launcher = Path.home() / ".local" / "bin" / "qlam"
+        # Fall back to running main.py directly if launcher not installed
+        if not launcher.exists():
+            import sys
+            from pathlib import Path as P
+            launcher = P(sys.argv[0]).resolve()
+        if enable:
+            AUTOSTART_FILE.write_text(
+                "[Desktop Entry]\n"
+                "Name=Qlam\n"
+                f"Exec={launcher} --tray\n"
+                "Type=Application\n"
+                "Categories=System;Security;\n"
+                "Comment=Qlam antivirus — background protection\n"
+                "X-GNOME-Autostart-enabled=true\n"
+                "Hidden=false\n"
+            )
+        else:
+            AUTOSTART_FILE.unlink(missing_ok=True)
 
     def _on_update_output(self, line: str):
         self._update_log.append(f'<span style="color:#525252;">{line}</span>')

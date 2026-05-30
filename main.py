@@ -29,6 +29,8 @@ def load_stylesheet() -> str:
 def main():
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
+    tray_only = "--tray" in sys.argv
+
     app = QApplication(sys.argv)
     app.setApplicationName("Qlam")
     app.setApplicationDisplayName("Qlam Antivirus")
@@ -48,7 +50,8 @@ def main():
         app.setStyleSheet(stylesheet)
 
     window = MainWindow()
-    window.show()
+    if not tray_only:
+        window.show()
 
     sys.exit(app.exec())
 

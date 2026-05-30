@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import qtawesome as qta
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import Qt, QTimer, QSize, QTime
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -79,6 +79,11 @@ class MainWindow(QMainWindow):
 
         self._realtime = RealtimeProtection(self._scan_engine, self)
         self._nav_to(0)
+
+        # Timer for time-based scheduled scans (checks every minute)
+        self._sched_timer = QTimer(self)
+        self._sched_timer.timeout.connect(self._check_scheduled_scan)
+        self._sched_timer.start(60_000)
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
@@ -358,10 +363,39 @@ class MainWindow(QMainWindow):
         self._scan_engine._max_file_size_mb = settings.get("max_file_size_mb", 100)
         self._scan_engine._scan_archives = settings.get("scan_archives", True)
 
+        # Real-time protection — only start if user explicitly enabled it
+        rt_enabled = settings.get("realtime_enabled", False)
         rt_paths = settings.get("realtime_paths", [])
-        if rt_paths:
+        if rt_enabled and rt_paths:
             self._realtime.set_watched_paths(rt_paths)
             if not self._realtime.is_active():
                 self._realtime.start(rt_paths)
         else:
             self._realtime.stop()
+
+        # Startup scan
+        if settings.get("scheduled_scan_enabled") and \
+                settings.get("scheduled_scan_trigger") == "startup" and \
+                not hasattr(self, "_startup_scan_done"):
+            self._startup_scan_done = True
+            scan_type = settings.get("scheduled_scan_type", "quick")
+            QTimer.singleShot(10_000, lambda: self._start_scan_from_dashboard(scan_type))
+
+    def _check_scheduled_scan(self):
+        settings = self._settings_page.get_settings()
+        if not settings.get("scheduled_scan_enabled"):
+            return
+        if settings.get("scheduled_scan_trigger") != "time":
+            return
+        target = settings.get("scheduled_scan_time", "02:00")
+        now = QTime.currentTime()
+        h, m = (int(x) for x in target.split(":"))
+        if now.hour() == h and now.minute() == m:
+            if not self._scan_engine.isRunning():
+                scan_type = settings.get("scheduled_scan_type", "quick")
+                self._start_scan_from_dashboard(scan_type)
+                self._tray.showMessage(
+                    "Qlam — Scheduled Scan",
+                    f"Scheduled {scan_type} scan started.",
+                    QSystemTrayIcon.MessageIcon.Information, 4000
+                )
