@@ -48,6 +48,10 @@ git clone https://github.com/berkkucukk/Qlam.git
 cd Qlam
 ./install.sh
 ```
+```bash
+paru -S qlam
+yay -S qlam
+```
 
 The installer will:
 1. Install system packages (`clamav`, `polkit`) via your distro's package manager
