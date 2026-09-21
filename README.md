@@ -102,14 +102,19 @@ Qlam/
 │   ├── history_manager.py
 │   └── realtime_protection.py
 ├── ui/
-│   ├── main_window.py       # Main window + sidebar navigation
+│   ├── main_window.py       # Frameless window + custom title bar + sidebar
+│   ├── theme.py             # Monochrome dark/light theme system
 │   ├── dashboard_page.py
 │   ├── scan_page.py
 │   ├── quarantine_page.py
 │   ├── history_page.py
-│   └── settings_page.py
+│   ├── settings_page.py
+│   └── sudo_dialog.py
 ├── resources/
-│   └── style.qss            # OLED dark theme stylesheet
+│   ├── check_dark.svg       # Theme-aware checkbox marks
+│   ├── check_light.svg
+│   ├── arrow_up.png
+│   └── arrow_down.png
 ├── Logos/
 ├── Screenshots/
 ├── install.sh

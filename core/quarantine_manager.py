@@ -40,8 +40,36 @@ class QuarantinedFile:
 class QuarantineManager:
     def __init__(self):
         QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+        # 0700: the store holds live malware. The per-file 0o000 below is set
+        # after the move, so there is a moment where the sample still carries
+        # its original mode — possibly executable. A directory nothing else can
+        # enter closes that window instead of racing it.
+        try:
+            os.chmod(QUARANTINE_DIR, 0o700)
+        except OSError:
+            pass
         self._index: list[QuarantinedFile] = []
         self._load_index()
+
+    @staticmethod
+    def _in_store(path: str) -> bool:
+        """True if `path` really is one of our quarantined files.
+
+        index.json is an ordinary file in the user's home, so its contents are
+        input, not fact. Every path taken from it is checked back against the
+        store before anything is moved or deleted — otherwise an edited index
+        turns "restore" into "move this arbitrary file wherever I say" and
+        "delete" into "unlink this arbitrary file". Harmless while Qlam runs as
+        the user who owns both, and a real hole the first time any of this runs
+        elevated, which is not a bet worth carrying.
+        """
+        try:
+            root = os.path.realpath(QUARANTINE_DIR)
+            target = os.path.realpath(path)
+        except OSError:
+            return False
+        # Compare on a path boundary, never as a string prefix.
+        return target.startswith(root + os.sep)
 
     def quarantine_file(self, original_path: str, threat: str) -> QuarantinedFile | None:
         try:
@@ -64,6 +92,10 @@ class QuarantineManager:
         entry = self._find(qid)
         if entry is None:
             return False
+        if not self._in_store(entry.quarantine_path):
+            return False
+        if not os.path.isabs(entry.original_path):
+            return False
         try:
             os.chmod(entry.quarantine_path, 0o644)
             dest_dir = os.path.dirname(entry.original_path)
@@ -78,6 +110,8 @@ class QuarantineManager:
     def delete_file(self, qid: str) -> bool:
         entry = self._find(qid)
         if entry is None:
+            return False
+        if not self._in_store(entry.quarantine_path):
             return False
         try:
             if os.path.exists(entry.quarantine_path):
@@ -124,8 +158,19 @@ class QuarantineManager:
             self._index = []
 
     def _save_index(self):
+        # Write-and-rename: opening the real file truncates it first, so a
+        # crash mid-write left an index that named none of the files sitting in
+        # the store — every quarantined sample orphaned, with no way back to
+        # where it came from.
+        tmp = QUARANTINE_INDEX.with_suffix(".tmp")
         try:
-            with open(QUARANTINE_INDEX, "w") as f:
+            with open(tmp, "w") as f:
                 json.dump([e.to_dict() for e in self._index], f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, QUARANTINE_INDEX)
         except Exception:
-            pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass

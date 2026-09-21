@@ -7,3 +7,7 @@ data/
 *.log
 /tmp/
 .DS_Store
+
+# Packaged build artifacts
+dist-pkg/
+*.pkg.tar.*

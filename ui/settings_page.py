@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTime
 
 from core.database_manager import DatabaseManager
+from ui.theme import theme
 
 SETTINGS_FILE = Path.home() / ".local" / "share" / "Qlam" / "settings.json"
 AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "qlam.desktop"
@@ -35,11 +36,6 @@ DEFAULTS = {
     "scheduled_scan_time": "02:00",
 }
 
-_LABEL = "color: #a3a3a3; font-size: 13px;"
-_SECTION = "color: #ffffff; font-size: 13px; font-weight: 600;"
-_DIM = "color: #525252; font-size: 12px;"
-
-
 def _section_card(title: str, icon_name: str) -> tuple[QFrame, QVBoxLayout]:
     card = QFrame()
     card.setObjectName("Card")
@@ -50,17 +46,17 @@ def _section_card(title: str, icon_name: str) -> tuple[QFrame, QVBoxLayout]:
     header = QHBoxLayout()
     header.setSpacing(10)
     icon_lbl = QLabel()
-    icon_lbl.setPixmap(qta.icon(icon_name, color="#3b82f6").pixmap(QSize(15, 15)))
+    icon_lbl.setPixmap(qta.icon(icon_name, color=theme.p["text_mid"]).pixmap(QSize(15, 15)))
     header.addWidget(icon_lbl)
     title_lbl = QLabel(title)
-    title_lbl.setStyleSheet(_SECTION)
+    title_lbl.setObjectName("Strong")
     header.addWidget(title_lbl)
     header.addStretch()
     lay.addLayout(header)
 
     sep = QFrame()
+    sep.setFrameShape(QFrame.Shape.HLine)
     sep.setFixedHeight(1)
-    sep.setStyleSheet("background-color: #1e1e1e; border: none;")
     lay.addWidget(sep)
 
     return card, lay
@@ -102,7 +98,7 @@ def _row(lay: QVBoxLayout, label: str, widget: QWidget, hint: str = ""):
     row = QHBoxLayout()
     row.setSpacing(16)
     lbl = QLabel(label)
-    lbl.setStyleSheet(_LABEL)
+    lbl.setObjectName("Muted")
     lbl.setFixedWidth(180)
     row.addWidget(lbl)
     row.addWidget(widget)
@@ -110,7 +106,7 @@ def _row(lay: QVBoxLayout, label: str, widget: QWidget, hint: str = ""):
     lay.addLayout(row)
     if hint:
         hint_lbl = QLabel(hint)
-        hint_lbl.setStyleSheet(_DIM)
+        hint_lbl.setObjectName("Dim")
         hint_lbl.setContentsMargins(196, 0, 0, 0)
         lay.addWidget(hint_lbl)
 
@@ -137,12 +133,10 @@ class SettingsPage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         root = QVBoxLayout(content)
-        root.setContentsMargins(32, 0, 32, 32)
+        root.setContentsMargins(32, 24, 32, 32)
         root.setSpacing(14)
 
         title = QLabel("Settings")
@@ -152,6 +146,7 @@ class SettingsPage(QWidget):
         sub = QLabel("Scan behavior, real-time protection and database updates")
         sub.setObjectName("PageSubtitle")
         root.addWidget(sub)
+        root.addSpacing(8)
 
         # ── Scan Options card ─────────────────────────────────────────────
         card1, c1 = _section_card("Scan Options", "fa5s.sliders-h")
@@ -161,19 +156,15 @@ class SettingsPage(QWidget):
              "Files larger than this are skipped")
 
         self._archives_chk = QCheckBox("Scan inside archives  (zip, tar, gz...)")
-        self._archives_chk.setStyleSheet(_LABEL)
         c1.addWidget(self._archives_chk)
 
         self._symlinks_chk = QCheckBox("Follow symbolic links")
-        self._symlinks_chk.setStyleSheet(_LABEL)
         c1.addWidget(self._symlinks_chk)
 
         self._recursive_chk = QCheckBox("Recursive directory scanning")
-        self._recursive_chk.setStyleSheet(_LABEL)
         c1.addWidget(self._recursive_chk)
 
         self._auto_quarantine_chk = QCheckBox("Automatically quarantine detected threats")
-        self._auto_quarantine_chk.setStyleSheet(_LABEL)
         c1.addWidget(self._auto_quarantine_chk)
 
         root.addWidget(card1)
@@ -182,7 +173,6 @@ class SettingsPage(QWidget):
         card2, c2 = _section_card("Notifications", "fa5s.bell")
 
         self._notify_chk = QCheckBox("Show desktop notification when a threat is detected")
-        self._notify_chk.setStyleSheet(_LABEL)
         c2.addWidget(self._notify_chk)
 
         root.addWidget(card2)
@@ -193,7 +183,6 @@ class SettingsPage(QWidget):
         self._autostart_chk = QCheckBox(
             "Launch Qlam automatically when the system starts  (runs in system tray)"
         )
-        self._autostart_chk.setStyleSheet(_LABEL)
         c_auto.addWidget(self._autostart_chk)
 
         root.addWidget(card_auto)
@@ -202,14 +191,13 @@ class SettingsPage(QWidget):
         card_sched, c_sched = _section_card("Scheduled Scan", "fa5s.calendar-alt")
 
         self._sched_enabled_chk = QCheckBox("Enable scheduled automatic scan")
-        self._sched_enabled_chk.setStyleSheet(_LABEL)
         self._sched_enabled_chk.toggled.connect(self._on_sched_toggled)
         c_sched.addWidget(self._sched_enabled_chk)
 
         # Scan type row
         stype_row = QHBoxLayout()
         stype_lbl = QLabel("Scan type:")
-        stype_lbl.setStyleSheet(_LABEL)
+        stype_lbl.setObjectName("Muted")
         stype_lbl.setFixedWidth(120)
         stype_row.addWidget(stype_lbl)
         self._sched_type_combo = QComboBox()
@@ -222,7 +210,7 @@ class SettingsPage(QWidget):
         # Trigger row
         trig_row = QHBoxLayout()
         trig_lbl = QLabel("Run:")
-        trig_lbl.setStyleSheet(_LABEL)
+        trig_lbl.setObjectName("Muted")
         trig_lbl.setFixedWidth(120)
         trig_row.addWidget(trig_lbl)
         self._sched_trigger_combo = QComboBox()
@@ -236,17 +224,12 @@ class SettingsPage(QWidget):
         # Time picker (only visible when "At a specific time" is selected)
         time_row = QHBoxLayout()
         time_lbl = QLabel("Time:")
-        time_lbl.setStyleSheet(_LABEL)
+        time_lbl.setObjectName("Muted")
         time_lbl.setFixedWidth(120)
         time_row.addWidget(time_lbl)
         self._sched_time_edit = QTimeEdit()
         self._sched_time_edit.setDisplayFormat("HH:mm")
         self._sched_time_edit.setFixedWidth(90)
-        self._sched_time_edit.setStyleSheet(
-            "QTimeEdit { background-color: #0c0c0c; border: 1px solid #262626;"
-            " border-radius: 6px; color: #fafafa; padding: 5px 8px; }"
-            "QTimeEdit::up-button, QTimeEdit::down-button { width: 0; }"
-        )
         time_row.addWidget(self._sched_time_edit)
         time_row.addStretch()
         self._time_row_widget = QWidget()
@@ -259,21 +242,16 @@ class SettingsPage(QWidget):
         card3, c3 = _section_card("Real-time Protection — Watched Paths", "fa5s.eye")
 
         self._rt_enabled_chk = QCheckBox("Enable real-time protection")
-        self._rt_enabled_chk.setStyleSheet(_LABEL)
         self._rt_enabled_chk.toggled.connect(self._on_rt_enabled_toggled)
         c3.addWidget(self._rt_enabled_chk)
 
         hint = QLabel("One path per line. Qlam monitors these directories for new or modified files.")
-        hint.setStyleSheet(_DIM)
+        hint.setObjectName("Dim")
         hint.setWordWrap(True)
         c3.addWidget(hint)
 
         self._rt_paths_edit = QTextEdit()
         self._rt_paths_edit.setFixedHeight(96)
-        self._rt_paths_edit.setStyleSheet(
-            "background-color: #080808; border: 1px solid #262626; border-radius: 8px;"
-            "color: #a3a3a3; font-family: monospace; font-size: 12px; padding: 8px;"
-        )
         c3.addWidget(self._rt_paths_edit)
 
         root.addWidget(card3)
@@ -282,16 +260,17 @@ class SettingsPage(QWidget):
         card4, c4 = _section_card("Virus Database", "fa5s.database")
 
         update_row = QHBoxLayout()
-        self._update_btn = QPushButton("  Update Now")
+        self._update_btn = QPushButton("   Update Now")
         self._update_btn.setObjectName("PrimaryButton")
-        self._update_btn.setIcon(qta.icon("fa5s.sync-alt", color="#ffffff"))
+        self._update_btn.setIcon(qta.icon("fa5s.sync-alt", color=theme.p["accent_text"]))
         self._update_btn.setIconSize(QSize(13, 13))
-        self._update_btn.setFixedWidth(150)
+        self._update_btn.setFixedWidth(160)
+        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_btn.clicked.connect(lambda: self._run_update())
         update_row.addWidget(self._update_btn)
 
         self._update_status = QLabel("Runs freshclam to fetch the latest signatures")
-        self._update_status.setStyleSheet(_DIM)
+        self._update_status.setObjectName("Dim")
         update_row.addWidget(self._update_status)
         update_row.addStretch()
         c4.addLayout(update_row)
@@ -299,10 +278,6 @@ class SettingsPage(QWidget):
         self._update_log = QTextEdit()
         self._update_log.setReadOnly(True)
         self._update_log.setFixedHeight(110)
-        self._update_log.setStyleSheet(
-            "background-color: #080808; border: 1px solid #1e1e1e; border-radius: 8px;"
-            "color: #a3a3a3; font-family: monospace; font-size: 11px; padding: 8px;"
-        )
         self._update_log.setPlaceholderText("Update output will appear here...")
         c4.addWidget(self._update_log)
 
@@ -311,12 +286,13 @@ class SettingsPage(QWidget):
 
         # Save button
         save_row = QHBoxLayout()
-        save_btn = QPushButton("  Save Settings")
+        save_btn = QPushButton("   Save Settings")
         save_btn.setObjectName("PrimaryButton")
-        save_btn.setIcon(qta.icon("fa5s.check", color="#ffffff"))
+        save_btn.setIcon(qta.icon("fa5s.check", color=theme.p["accent_text"]))
         save_btn.setIconSize(QSize(13, 13))
-        save_btn.setMinimumWidth(150)
-        save_btn.setMinimumHeight(42)
+        save_btn.setMinimumWidth(160)
+        save_btn.setMinimumHeight(44)
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_btn.clicked.connect(self._save_and_emit)
         save_row.addWidget(save_btn)
         save_row.addStretch()
@@ -331,10 +307,27 @@ class SettingsPage(QWidget):
     def get_settings(self) -> dict:
         return dict(self._settings)
 
+    def set_realtime_enabled(self, enabled: bool):
+        """Reflect the live real-time state in the checkbox and persist it, so
+        the Settings page and Dashboard never disagree (e.g. after toggling
+        protection from the Dashboard). Does not pop the 'saved' dialog."""
+        if self._settings.get("realtime_enabled") == enabled and \
+                self._rt_enabled_chk.isChecked() == enabled:
+            return
+        self._rt_enabled_chk.blockSignals(True)
+        self._rt_enabled_chk.setChecked(enabled)
+        self._rt_enabled_chk.blockSignals(False)
+        self._on_rt_enabled_toggled(enabled)
+        self._settings["realtime_enabled"] = enabled
+        self._persist()
+
+    def realtime_paths(self) -> list[str]:
+        return list(self._settings.get("realtime_paths", []))
+
     def _run_update(self):
         self._update_btn.setEnabled(False)
         self._update_status.setText("Waiting for authentication...")
-        self._update_status.setStyleSheet("color: #a3a3a3; font-size: 12px;")
+        self._update_status.setStyleSheet(f"color: {theme.p['text_mid']}; font-size: 12px;")
         self._update_log.clear()
         self._db_manager.run_update()
 
@@ -434,11 +427,12 @@ class SettingsPage(QWidget):
             AUTOSTART_FILE.unlink(missing_ok=True)
 
     def _on_update_output(self, line: str):
-        self._update_log.append(f'<span style="color:#525252;">{line}</span>')
+        self._update_log.append(
+            f'<span style="color:{theme.p["text_mid"]};">{line}</span>')
 
     def _on_update_finished(self, success: bool, message: str):
         self._update_btn.setEnabled(True)
-        color = "#22c55e" if success else "#ef4444"
+        color = theme.p["good"] if success else theme.p["bad"]
         self._update_status.setText(message)
         self._update_status.setStyleSheet(f"color: {color}; font-size: 12px;")
         self._update_log.append(

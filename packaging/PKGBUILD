@@ -1,0 +1,72 @@
+# Maintainer: Berk Küçük <berkkucukk@proton.me>
+
+pkgname=qlam
+pkgver=1.3.0
+pkgrel=1
+pkgdesc="A modern antivirus GUI powered by ClamAV"
+arch=('x86_64')
+url="https://github.com/berk-kucuk/QLAM"
+license=('MIT')
+# Python libraries (PyQt6, qtawesome, pyclamd, watchdog) come from
+# maze-python, the shared Maze venv at /opt/maze/venv.
+depends=(
+    'maze-python'
+    'clamav'
+    'polkit'
+)
+optdepends=(
+    'clamav-freshclam: automatic virus database updates'
+)
+# LOCAL BUILD: the source tarball is generated from the local working tree by
+# ../build-pkg.sh (NOT fetched from GitHub). To publish to the AUR, restore the
+# github archive::URL source and the real sha256sums.
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "QLAM-$pkgver"
+
+    # App files
+    install -dm755 "$pkgdir/usr/share/qlam"
+    cp -r main.py core ui resources Logos \
+        "$pkgdir/usr/share/qlam/"
+
+    find "$pkgdir/usr/share/qlam" -type d -name __pycache__ -prune -exec rm -rf {} +
+
+    # Launcher
+    install -dm755 "$pkgdir/usr/bin"
+    cat > "$pkgdir/usr/bin/qlam" << 'EOF'
+#!/bin/bash
+exec /opt/maze/venv/bin/python3 /usr/share/qlam/main.py "$@"
+EOF
+    chmod 755 "$pkgdir/usr/bin/qlam"
+
+    # Desktop entry
+    install -Dm644 /dev/stdin \
+        "$pkgdir/usr/share/applications/qlam.desktop" << 'EOF'
+[Desktop Entry]
+Name=Qlam
+GenericName=Antivirus
+Comment=ClamAV-powered antivirus with a modern interface
+Exec=qlam
+Icon=qlam
+Terminal=false
+Type=Application
+Categories=System;Security;
+Keywords=antivirus;clamav;security;scan;virus;malware;
+StartupNotify=true
+StartupWMClass=Qlam
+EOF
+
+    # Icons
+    install -Dm644 Logos/qlam.png \
+        "$pkgdir/usr/share/icons/hicolor/256x256/apps/qlam.png"
+    install -Dm644 Logos/qlam.png \
+        "$pkgdir/usr/share/pixmaps/qlam.png"
+
+    # License
+    install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+    if [ -f LICENSE ]; then
+        install -m644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    fi
+}

@@ -2,8 +2,10 @@ import qtawesome as qta
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QDialogButtonBox,
+    QLineEdit, QPushButton, QDialogButtonBox, QFrame,
 )
+
+from ui.theme import theme
 
 
 class SudoDialog(QDialog):
@@ -25,31 +27,32 @@ class SudoDialog(QDialog):
         header.setSpacing(14)
         icon_lbl = QLabel()
         icon_lbl.setPixmap(
-            qta.icon("fa5s.lock", color="#3b82f6").pixmap(QSize(28, 28))
+            qta.icon("fa5s.lock", color=theme.p["text_mid"]).pixmap(QSize(28, 28))
         )
         header.addWidget(icon_lbl)
 
         title_col = QVBoxLayout()
         title_col.setSpacing(3)
         t = QLabel("Authentication Required")
-        t.setStyleSheet("font-size: 15px; font-weight: 700; color: #ffffff;")
+        t.setObjectName("Strong")
+        t.setStyleSheet("font-size: 15px; font-weight: 700;")
         title_col.addWidget(t)
         s = QLabel(reason)
-        s.setStyleSheet("font-size: 12px; color: #525252;")
+        s.setObjectName("Muted")
         s.setWordWrap(True)
         title_col.addWidget(s)
         header.addLayout(title_col)
         lay.addLayout(header)
 
         # Separator
-        sep = QLabel()
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFixedHeight(1)
-        sep.setStyleSheet("background-color: #1e1e1e;")
         lay.addWidget(sep)
 
         # Password field
         pwd_lbl = QLabel("Password:")
-        pwd_lbl.setStyleSheet("color: #a3a3a3; font-size: 13px;")
+        pwd_lbl.setObjectName("Muted")
         lay.addWidget(pwd_lbl)
 
         self._pwd_field = QLineEdit()
@@ -63,13 +66,15 @@ class SudoDialog(QDialog):
         btn_row.addStretch()
 
         cancel = QPushButton("Cancel")
-        cancel.setFixedWidth(90)
+        cancel.setMinimumWidth(96)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel.clicked.connect(self.reject)
         btn_row.addWidget(cancel)
 
         ok = QPushButton("Authenticate")
         ok.setObjectName("PrimaryButton")
-        ok.setFixedWidth(110)
+        ok.setMinimumWidth(140)
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
         ok.clicked.connect(self._on_accept)
         btn_row.addWidget(ok)
         lay.addLayout(btn_row)

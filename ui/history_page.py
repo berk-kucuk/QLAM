@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QColor
 
 from core.history_manager import HistoryManager, ScanRecord
+from ui.theme import theme
 
 
 class ThreatDetailDialog(QDialog):
@@ -30,7 +31,7 @@ class ThreatDetailDialog(QDialog):
 
         if record.threats:
             t_label = QLabel("Threats:")
-            t_label.setStyleSheet("font-weight: bold; color: #f85149;")
+            t_label.setStyleSheet(f"font-weight: bold; color: {theme.p['bad']};")
             lay.addWidget(t_label)
             text = QTextEdit()
             text.setReadOnly(True)
@@ -48,10 +49,11 @@ class HistoryPage(QWidget):
         super().__init__(parent)
         self._hm = history_manager
         self._build_ui()
+        theme.changed.connect(lambda _p: self.refresh())
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 0, 32, 32)
+        root.setContentsMargins(32, 24, 32, 32)
         root.setSpacing(0)
 
         title = QLabel("Scan History")
@@ -61,6 +63,7 @@ class HistoryPage(QWidget):
         sub = QLabel("Record of all previous scans")
         sub.setObjectName("PageSubtitle")
         root.addWidget(sub)
+        root.addSpacing(20)
 
         # Toolbar
         toolbar = QHBoxLayout()
@@ -68,6 +71,7 @@ class HistoryPage(QWidget):
 
         details_btn = QPushButton("View Details")
         details_btn.setObjectName("GhostButton")
+        details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         details_btn.clicked.connect(self._view_details)
         toolbar.addWidget(details_btn)
 
@@ -75,11 +79,12 @@ class HistoryPage(QWidget):
 
         clear_btn = QPushButton("Clear History")
         clear_btn.setObjectName("DangerButton")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_btn.clicked.connect(self._clear)
         toolbar.addWidget(clear_btn)
 
         root.addLayout(toolbar)
-        root.addSpacing(12)
+        root.addSpacing(14)
 
         # Table
         self._table = QTableWidget()
@@ -110,14 +115,14 @@ class HistoryPage(QWidget):
             self._table.setItem(row, 1, _item(rec.scan_type.title()))
             self._table.setItem(row, 2, _item(str(rec.total_files)))
             self._table.setItem(row, 3, _item(str(rec.infected_files),
-                                               "#f85149" if rec.infected_files > 0 else ""))
+                                               theme.p["bad"] if rec.infected_files > 0 else ""))
             self._table.setItem(row, 4, _item(f"{rec.duration:.1f}s"))
 
             status_item = _item(rec.status)
             if rec.infected_files > 0:
-                status_item.setForeground(QColor("#f85149"))
+                status_item.setForeground(QColor(theme.p["bad"]))
             else:
-                status_item.setForeground(QColor("#3fb950"))
+                status_item.setForeground(QColor(theme.p["good"]))
             self._table.setItem(row, 5, status_item)
 
             self._table.item(row, 0).setData(Qt.ItemDataRole.UserRole, row)

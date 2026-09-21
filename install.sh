@@ -153,7 +153,7 @@ Type=Application
 Categories=System;Security;
 Keywords=antivirus;clamav;security;scan;
 StartupNotify=true
-StartupWMClass=Qlam
+StartupWMClass=qlam
 DESKTOP
     chmod +x "$DESKTOP_DIR/qlam.desktop"
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true

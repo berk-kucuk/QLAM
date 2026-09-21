@@ -1,8 +1,15 @@
 import os
 import threading
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
+
+# Don't rescan the same path more than once within this window — editors and
+# temp files fire a burst of modify events for a single logical change.
+_DEBOUNCE_SECONDS = 5.0
+
+_QUARANTINE_DIR = str(Path.home() / ".local" / "share" / "Qlam" / "quarantine")
 
 try:
     from watchdog.observers import Observer
@@ -45,6 +52,7 @@ class RealtimeProtection(QObject):
         self._active = False
         self._watched_paths: list[str] = list(DEFAULT_WATCH_PATHS)
         self._pending: set[str] = set()
+        self._recent: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def is_active(self) -> bool:
@@ -58,6 +66,13 @@ class RealtimeProtection(QObject):
             return
         if paths:
             self._watched_paths = paths
+
+        # Prefer the clamd daemon (signatures stay resident → near-instant
+        # per-file scans). Falls back to clamscan transparently if unavailable.
+        try:
+            self._engine.connect_daemon()
+        except Exception:
+            pass
 
         self._observer = Observer()
         handler = _ThreatHandler(self._on_file_event)
@@ -85,14 +100,34 @@ class RealtimeProtection(QObject):
         if was_active:
             self.start()
 
+    def _should_handle(self, filepath: str) -> bool:
+        base = os.path.basename(filepath)
+        if base.startswith("."):
+            return False  # hidden / editor swap / partial-download files
+        if filepath.startswith(_QUARANTINE_DIR):
+            return False  # never rescan files we just isolated
+        if not os.path.isfile(filepath):
+            return False  # gone already, or a directory
+        if not self._engine._should_scan(filepath):
+            return False  # too large (respects the max-file-size setting)
+        now = time.time()
+        last = self._recent.get(filepath)
+        if last is not None and (now - last) < _DEBOUNCE_SECONDS:
+            return False  # scanned very recently — ignore the modify-storm
+        self._recent[filepath] = now
+        # Keep the debounce map from growing unbounded on busy watch dirs.
+        if len(self._recent) > 512:
+            cutoff = now - _DEBOUNCE_SECONDS
+            self._recent = {k: v for k, v in self._recent.items() if v > cutoff}
+        return True
+
     def _on_file_event(self, filepath: str):
         with self._lock:
-            if filepath in self._pending:
+            if filepath in self._pending or not self._should_handle(filepath):
                 return
             self._pending.add(filepath)
 
         try:
-            from core.scan_engine import ScanEngine
             result = self._engine._scan_single(filepath)
             if result.infected:
                 self.threat_detected.emit(filepath, result.threat)

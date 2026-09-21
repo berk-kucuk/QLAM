@@ -5,8 +5,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QAbstractItemView,
 )
+from PyQt6.QtGui import QColor
 
 from core.quarantine_manager import QuarantineManager, QuarantinedFile
+from ui.theme import theme
 
 
 class QuarantinePage(QWidget):
@@ -14,10 +16,12 @@ class QuarantinePage(QWidget):
         super().__init__(parent)
         self._qm = quarantine_manager
         self._build_ui()
+        theme.changed.connect(lambda _p: self._apply_theme())
+        self._apply_theme()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 0, 32, 32)
+        root.setContentsMargins(32, 24, 32, 32)
         root.setSpacing(0)
 
         title = QLabel("Quarantine")
@@ -27,40 +31,41 @@ class QuarantinePage(QWidget):
         sub = QLabel("Files that have been isolated due to detected threats")
         sub.setObjectName("PageSubtitle")
         root.addWidget(sub)
+        root.addSpacing(20)
 
         # Toolbar
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        self._restore_btn = QPushButton("  Restore Selected")
+        self._restore_btn = QPushButton("   Restore Selected")
         self._restore_btn.setObjectName("WarnButton")
-        self._restore_btn.setIcon(qta.icon("fa5s.undo-alt", color="#fbbf24"))
         self._restore_btn.setIconSize(QSize(13, 13))
+        self._restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._restore_btn.clicked.connect(self._restore_selected)
         toolbar.addWidget(self._restore_btn)
 
-        self._delete_btn = QPushButton("  Delete Selected")
+        self._delete_btn = QPushButton("   Delete Selected")
         self._delete_btn.setObjectName("DangerButton")
-        self._delete_btn.setIcon(qta.icon("fa5s.trash", color="#fca5a5"))
         self._delete_btn.setIconSize(QSize(13, 13))
+        self._delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._delete_btn.clicked.connect(self._delete_selected)
         toolbar.addWidget(self._delete_btn)
 
-        self._delete_all_btn = QPushButton("  Delete All")
+        self._delete_all_btn = QPushButton("   Delete All")
         self._delete_all_btn.setObjectName("DangerButton")
-        self._delete_all_btn.setIcon(qta.icon("fa5s.trash-alt", color="#fca5a5"))
         self._delete_all_btn.setIconSize(QSize(13, 13))
+        self._delete_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._delete_all_btn.clicked.connect(self._delete_all)
         toolbar.addWidget(self._delete_all_btn)
 
         toolbar.addStretch()
 
         self._count_label = QLabel("0 files in quarantine")
-        self._count_label.setObjectName("CardSub")
+        self._count_label.setObjectName("Muted")
         toolbar.addWidget(self._count_label)
 
         root.addLayout(toolbar)
-        root.addSpacing(12)
+        root.addSpacing(14)
 
         # Table
         self._table = QTableWidget()
@@ -81,13 +86,20 @@ class QuarantinePage(QWidget):
 
         self.refresh()
 
+    def _apply_theme(self):
+        p = theme.p
+        self._restore_btn.setIcon(qta.icon("fa5s.undo-alt", color=p["warn"]))
+        self._delete_btn.setIcon(qta.icon("fa5s.trash", color=p["bad"]))
+        self._delete_all_btn.setIcon(qta.icon("fa5s.trash-alt", color=p["bad"]))
+        self.refresh()
+
     def refresh(self):
         files = self._qm.list_files()
         self._table.setRowCount(len(files))
         for row, qf in enumerate(files):
             self._table.setItem(row, 0, _item(qf.filename))
             self._table.setItem(row, 1, _item(qf.original_path))
-            self._table.setItem(row, 2, _item(qf.threat, "#f85149"))
+            self._table.setItem(row, 2, _item(qf.threat, theme.p["bad"]))
             self._table.setItem(row, 3, _item(qf.timestamp[:19].replace("T", " ")))
             self._table.setItem(row, 4, _item(self._file_size(qf.quarantine_path)))
             # Store ID in hidden data
