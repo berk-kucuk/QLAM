@@ -2,7 +2,7 @@
 
 pkgname=qlam
 pkgver=1.3.0
-pkgrel=1
+pkgrel=2
 pkgdesc="A modern antivirus GUI powered by ClamAV"
 arch=('x86_64')
 url="https://github.com/berk-kucuk/QLAM"

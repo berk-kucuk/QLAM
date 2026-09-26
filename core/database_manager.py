@@ -159,7 +159,10 @@ class _UpdateWorker(QThread):
                 f"({' or '.join(_FRESHCLAM_PATHS)}). Install clamav.")
             return
 
-        pkexec = shutil.which("pkexec")
+        # A fixed system path, never PATH — the same reasoning as freshclam
+        # above: a fake ~/.local/bin/pkexec would draw a lookalike password
+        # dialog and receive the user's password.
+        pkexec = "/usr/bin/pkexec" if os.access("/usr/bin/pkexec", os.X_OK) else None
         if not pkexec:
             self.result.emit(
                 False, "pkexec not found. Install polkit or run: sudo freshclam")
