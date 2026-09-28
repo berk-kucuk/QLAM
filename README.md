@@ -41,53 +41,68 @@
 
 ## Installation
 
-### One-line install
+### From the Maze repository
+
+**On Maze Linux** the repository is already configured:
 
 ```bash
-git clone https://github.com/berkkucukk/Qlam.git
-cd Qlam
-./install.sh
-```
-```bash
-paru -S qlam
-yay -S qlam
+sudo pacman -S qlam
 ```
 
-The installer will:
-1. Install system packages (`clamav`, `polkit`) via your distro's package manager
-2. Create a Python virtual environment at `~/.local/share/Qlam/venv`
-3. Install Python dependencies (`PyQt6`, `pyclamd`, `watchdog`, `qtawesome`)
-4. Create a launcher at `~/.local/bin/qlam`
-5. Add a `.desktop` entry to your application launcher
+**On Arch Linux and Arch-based distributions**, add the repository once:
 
-### Supported distros
+1. Import and trust the Maze signing key:
 
-| Distro | Package manager |
-|---|---|
-| Arch Linux / Manjaro | `pacman` |
-| Ubuntu / Debian / Mint | `apt` |
-| Fedora / RHEL / CentOS | `dnf` |
-| openSUSE | `zypper` |
+   ```bash
+   curl -O https://mazerepo.berkkucukk.com.tr/packages/mazelinux.gpg
+   gpg --show-keys --with-fingerprint mazelinux.gpg
+   sudo pacman-key --add mazelinux.gpg
+   sudo pacman-key --lsign-key 7C4D515A6B930CB04794CEF6147C8159B3E2EE5F
+   ```
 
-### Run after install
+   The fingerprint `gpg` prints must be `7C4D 515A 6B93 0CB0 4794  CEF6 147C 8159 B3E2 EE5F`.
+
+2. Add the repository to the end of `/etc/pacman.conf`:
+
+   ```ini
+   [mazelinux]
+   SigLevel = Required DatabaseOptional
+   Server = https://mazerepo.berkkucukk.com.tr/packages
+   ```
+
+3. Sync and install:
+
+   ```bash
+   sudo pacman -Syu qlam
+   ```
+
+Optionally install `mazelinux-keyring` as well; it keeps the signing key up to date through pacman.
+
+Remove with `sudo pacman -Rns qlam`.
+
+Then run `qlam`, or find **Qlam** in your application launcher.
+
+### Build from source
+
+The package is built from this working tree by `build-pkg.sh` and installed with pacman, exactly like the published one:
 
 ```bash
-qlam
+sudo pacman -S --needed base-devel git
+git clone https://github.com/berk-kucuk/QLAM.git
+cd QLAM
+sudo pacman -S --needed $(bash -c 'source packaging/PKGBUILD; echo "${depends[@]}" "${makedepends[@]}"')
+./build-pkg.sh --install
 ```
 
-Or find **Qlam** in your application launcher.
+Without `--install` the package is only built, into `dist-pkg/`.
 
-### Uninstall
+`maze-python` (the shared Python runtime) comes from the Maze repository, so add the repository first (steps 1–2 above).
 
-```bash
-./uninstall.sh
-```
+## Development
 
-## Running from source
+Run straight from a checkout in a virtual environment:
 
 ```bash
-git clone https://github.com/berkkucukk/Qlam.git
-cd Qlam
 python3 -m venv venv
 source venv/bin/activate
 pip install PyQt6 pyclamd watchdog qtawesome
