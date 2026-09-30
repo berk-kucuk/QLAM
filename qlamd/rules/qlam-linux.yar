@@ -22,6 +22,15 @@ private rule is_elf
         uint32(0) == 0x464c457f
 }
 
+// Script rules require an interpreter line. Without it they match source
+// code, notes and rule files (this one included) that merely contain the
+// commands they look for.
+private rule is_script
+{
+    condition:
+        uint16(0) == 0x2123   // "#!"
+}
+
 rule Qlam_Test_EICAR
 {
     meta:
@@ -66,7 +75,7 @@ rule Qlam_Linux_Miner_Dropper_Script
         $hide1 = "history -c" ascii
         $hide2 = /\/(tmp|var\/tmp|dev\/shm)\/\.[a-z0-9]{1,16}/ ascii
     condition:
-        filesize < 1MB and ($fetch1 or $pool) and ($kill1 or $kill2) and 1 of ($hide*)
+        is_script and filesize < 1MB and ($fetch1 or $pool) and ($kill1 or $kill2) and 1 of ($hide*)
 }
 
 rule Qlam_Linux_Mirai
@@ -137,10 +146,9 @@ rule Qlam_Linux_ReverseShell_Script
         $r3 = /socket\.socket\([^)]*\)[^\n]{0,200}\n[^\n]{0,200}connect\(\([^)]*\)\)[\s\S]{0,400}(pty\.spawn|subprocess\.call\(\[?["']\/bin\/(ba)?sh)/
         $r4 = /mkfifo\s+\/tmp\/[a-z0-9]{1,16};\s*(cat|nc)[^\n]{0,80}\/bin\/(ba)?sh/
     condition:
-        // A script (shebang) or a tiny dropped one-liner. Documentation,
-        // pentest tool data (nmap .nse) and notes mention these commands all
-        // the time and must not be flagged.
-        any of them and (uint16(0) == 0x2123 or filesize < 2KB)
+        // Documentation, notes, pentest tool data (nmap .nse) and source code
+        // mention these commands all the time and must not be flagged.
+        is_script and filesize < 512KB and any of them
 }
 
 rule Qlam_Linux_Downloader_Pipe_Shell_Hidden
@@ -154,7 +162,7 @@ rule Qlam_Linux_Downloader_Pipe_Shell_Hidden
         $d2 = /(curl|wget)\s+[^\n|]{0,64}https?:\/\/(pastebin\.com\/raw|transfer\.sh|temp\.sh|[a-z0-9]+\.ngrok[a-z.-]*)[^\n|]{0,120}\|\s*(ba)?sh/
         $d3 = /echo\s+[A-Za-z0-9+\/=]{40,}\s*\|\s*base64\s+-d\s*\|\s*(ba)?sh/
     condition:
-        filesize < 1MB and any of them
+        is_script and filesize < 1MB and any of them
 }
 
 rule Qlam_PHP_Webshell_Generic
