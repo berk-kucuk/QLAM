@@ -9,9 +9,9 @@
 //!   - MalwareBazaar (abuse.ch, CC0): SHA-256 of malware samples. Only
 //!     samples attributed to a named family are imported (see hashdb.rs).
 //!     A full export on first run and monthly, the 48-hour export daily.
-//!   - YARA Forge core (curated, low false-positive rule set), minus rules
-//!     for dual-use tools and "suspicious" indicators; rules that yara-x
-//!     can't compile are dropped individually.
+//!   - YARA Forge core, reduced to rules for Linux executables (see
+//!     `select_feed_rules`); rules that yara-x can't compile are dropped
+//!     individually.
 //!
 //! Each feed is written to a temporary file and renamed into place, so a
 //! failed or interrupted update leaves the previous version intact.
@@ -19,15 +19,13 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::sync::LazyLock;
 use std::time::Duration;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::config::feeds_dir;
 use crate::engine::hashdb::Builder;
-use crate::engine::yara::check_source;
+use crate::engine::yara::{check_source, select_feed_rules};
 use crate::store::now;
 
 const UA: &str = concat!("qlam/", env!("CARGO_PKG_VERSION"), " (+https://github.com/berk-kucuk/QLAM)");
@@ -229,50 +227,23 @@ fn update_yara_forge(dir: &Path, state: &mut FeedState) -> io::Result<()> {
     state.yara_forge_tag = release.tag_name;
     state.yara_forge_rules = kept;
     state.yara_forge_dropped = dropped;
-    log::info!("YARA Forge: {kept} rules ({dropped} dropped: dual-use or incompatible)");
+    log::info!("YARA Forge: {kept} rules kept, {dropped} not for Linux executables or incompatible");
     Ok(())
 }
 
-static RULE_START: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^[ \t]*((private|global)[ \t]+)*rule[ \t]+([A-Za-z_][A-Za-z0-9_]*)").unwrap());
-static IMPORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?m)^[ \t]*import[ \t]+"[^"]+"[ \t]*$"#).unwrap());
-
-/// Rule families that describe *dual-use or merely unusual* files rather than
-/// malware: hacking tools (socat, nmap, mimikatz-likes), "suspicious"
-/// indicators, anomalies, PUA. On a desktop these fire on the user's own
-/// legitimate tools, which is exactly the false positive Qlam must not raise.
-static DUAL_USE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(hacktool|hktl|_tool|tool_|susp|anomal|_pua|pua_|offensive|pentest)").unwrap());
-
-/// Drop dual-use rules, then compile; if the remainder doesn't compile as a
-/// whole, keep the rules that compile on their own. Returns
-/// (source, kept, dropped).
+/// Select the feed rules Qlam uses (see `select_feed_rules`), then compile;
+/// if the selection doesn't compile as a whole, keep the rules that compile
+/// on their own. Returns (source, kept, dropped).
 fn keep_compilable(src: &str) -> (String, usize, usize) {
-    let heads: Vec<(usize, &str)> = RULE_START
-        .captures_iter(src)
-        .map(|c| (c.get(0).unwrap().start(), c.get(3).unwrap().as_str()))
-        .collect();
-    let imports: String = IMPORT.find_iter(src).map(|m| format!("{}\n", m.as_str().trim())).collect();
-
-    let mut rules = Vec::new();
-    let mut dropped = 0;
-    for (i, &(start, name)) in heads.iter().enumerate() {
-        let end = heads.get(i + 1).map(|h| h.0).unwrap_or(src.len());
-        if DUAL_USE.is_match(name) || crate::engine::yara::is_test_file_rule(name) {
-            dropped += 1;
-        } else {
-            rules.push(&src[start..end]);
-        }
-    }
-
-    let whole = format!("{imports}{}", rules.concat());
+    let sel = select_feed_rules(src);
+    let whole = format!("{}{}", sel.imports, sel.rules.concat());
     if check_source(&whole).is_ok() {
-        return (whole, rules.len(), dropped);
+        return (whole, sel.rules.len(), sel.dropped);
     }
-    let mut out = imports.clone();
-    let mut kept = 0;
-    for rule in rules {
-        if check_source(&format!("{imports}{rule}")).is_ok() {
+    let mut out = sel.imports.clone();
+    let (mut kept, mut dropped) = (0, sel.dropped);
+    for rule in sel.rules {
+        if check_source(&format!("{}{rule}", sel.imports)).is_ok() {
             out.push_str(rule);
             out.push('\n');
             kept += 1;
@@ -332,10 +303,15 @@ mod tests {
 
     #[test]
     fn drops_only_broken_rules() {
-        let src = "import \"pe\"\nrule good { condition: true }\nrule bad { condition: nosuchthing }\nrule good2 { strings: $a = \"x\" condition: $a }\nrule ELASTIC_Linux_Hacktool_Socat { condition: true }\nrule TRELLIX_ARC_Malw_Eicar { condition: true }\n";
+        let src = "import \"elf\"\n\
+            rule good { condition: uint32(0) == 0x464c457f }\n\
+            rule bad { condition: uint32(0) == 0x464c457f and nosuchthing }\n\
+            rule good2 { strings: $a = \"x\" condition: elf.type == elf.ET_EXEC and $a }\n\
+            rule ELASTIC_Linux_Hacktool_Socat { condition: uint32(0) == 0x464c457f }\n\
+            rule TRELLIX_ARC_Malw_Eicar { condition: true }\n";
         let (out, kept, dropped) = keep_compilable(src);
         assert_eq!((kept, dropped), (2, 3));
-        assert!(!out.contains("Eicar"));
+        assert!(out.contains("good2") && !out.contains("Eicar") && !out.contains("nosuchthing"));
         assert!(out.contains("good2") && !out.contains("nosuchthing") && !out.contains("Socat"));
     }
 }

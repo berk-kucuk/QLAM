@@ -10,7 +10,10 @@
 //!     ignored, since they are the ones that fire on legitimate files.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
+
+use regex::Regex;
 
 use yara_x::{Compiler, MetaValue, Rules, Scanner};
 
@@ -46,6 +49,15 @@ impl YaraRules {
         let mut loaded = 0;
         for (path, bundled) in files {
             let Ok(src) = std::fs::read_to_string(path) else { continue };
+            // Feed files on disk may predate the current selection; apply it
+            // again (before anything is compiled) so what's loaded never
+            // depends on when they were fetched.
+            let src = if *bundled {
+                src
+            } else {
+                let sel = select_feed_rules(&src);
+                format!("{}{}", sel.imports, sel.rules.concat())
+            };
             // One broken feed file must not take the bundled rules down with
             // it, so each file is test-compiled on its own first.
             if let Err(e) = check_source(&src) {
@@ -83,9 +95,12 @@ impl YaraRules {
                 return None;
             }
         };
+        // Feed rules are selected for Linux executables; enforce that here
+        // too, whatever their conditions say.
+        let is_elf = data.starts_with(b"\x7fELF");
         let mut best: Option<Match> = None;
         for rule in results.matching_rules() {
-            if !rule.namespace().starts_with(BUNDLED_PREFIX) && is_test_file_rule(rule.identifier()) {
+            if !rule.namespace().starts_with(BUNDLED_PREFIX) && (!is_elf || is_test_file_rule(rule.identifier())) {
                 continue;
             }
             let mut severity = None;
@@ -139,6 +154,66 @@ pub fn is_test_file_rule(identifier: &str) -> bool {
     identifier.to_ascii_lowercase().contains("eicar")
 }
 
+static RULE_START: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^[ \t]*((private|global)[ \t]+)*rule[ \t]+([A-Za-z_][A-Za-z0-9_]*)").unwrap());
+static IMPORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?m)^[ \t]*import[ \t]+"[^"]+"[ \t]*$"#).unwrap());
+
+/// Rule names for dual-use or merely unusual files rather than malware:
+/// hacking tools (socat, nmap), "suspicious" indicators, anomalies, PUA. On a
+/// desktop these fire on the user's own legitimate tools.
+static DUAL_USE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(hacktool|hktl|_tool|tool_|susp|anomal|_pua|pua_|offensive|pentest)").unwrap());
+
+/// A condition that requires the ELF header: `uint32(0) == 0x464c457f`, the
+/// elf module, or the magic spelled as bytes.
+static CHECKS_ELF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)0x464c457f|\belf\.|7f\s*45\s*4c\s*46|\\x7fELF").unwrap());
+
+pub struct FeedSelection<'a> {
+    pub imports: String,
+    pub rules: Vec<&'a str>,
+    pub dropped: usize,
+}
+
+/// The feed rules Qlam uses: those written for Linux executables, i.e. whose
+/// condition checks for an ELF file. (Matches of feed rules are also only
+/// counted on ELF files, see `scan`; this selection keeps memory down.) Of the ~4300 YARA Forge core rules that
+/// leaves ~80, and it cuts the daemon's memory by ~150 MB. The rest are for
+/// Windows files or match strings anywhere in any file; on a Linux desktop
+/// those mostly fire on text that quotes the strings — notes, documents, and
+/// rule files themselves (a copy of this very feed was reported as an APT41
+/// backdoor). An ELF check can never match a text file.
+///
+/// Dual-use and test-file rules are dropped even if they check for ELF.
+/// Private rules are kept: they are helpers that other rules may reference,
+/// and they never produce a finding of their own.
+pub fn select_feed_rules(src: &str) -> FeedSelection<'_> {
+    let heads: Vec<(usize, bool, &str)> = RULE_START
+        .captures_iter(src)
+        .map(|c| {
+            let private = c.get(1).is_some_and(|m| m.as_str().contains("private"));
+            (c.get(0).unwrap().start(), private, c.get(3).unwrap().as_str())
+        })
+        .collect();
+    let imports = IMPORT.find_iter(src).map(|m| format!("{}\n", m.as_str().trim())).collect();
+    let mut rules = Vec::new();
+    let mut dropped = 0;
+    for (i, &(start, private, name)) in heads.iter().enumerate() {
+        let end = heads.get(i + 1).map(|h| h.0).unwrap_or(src.len());
+        let body = &src[start..end];
+        // Only the condition counts: descriptions mention "ELF" freely.
+        let condition = body.rfind("condition:").map(|i| &body[i..]).unwrap_or("");
+        let wanted =
+            private || (CHECKS_ELF.is_match(condition) && !DUAL_USE.is_match(name) && !is_test_file_rule(name));
+        if wanted {
+            rules.push(body);
+        } else {
+            dropped += 1;
+        }
+    }
+    FeedSelection { imports, rules, dropped }
+}
+
 pub fn check_source(src: &str) -> Result<(), String> {
     let mut c = Compiler::new();
     c.add_source(src).map(|_| ()).map_err(|e| e.to_string())
@@ -153,4 +228,41 @@ fn rule_files(dir: &Path) -> Vec<PathBuf> {
         .collect();
     v.sort();
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FEED: &str = r#"import "elf"
+private rule is_elf_helper { condition: uint32(0) == 0x464c457f }
+rule Linux_Backdoor { strings: $a = "evilstring" condition: uint32(0) == 0x464c457f and $a }
+rule Linux_Module { meta: description = "strings in the ELF." strings: $a = "evilstring" condition: any of them }
+rule Win_Thing { strings: $a = "evilstring" condition: uint16(0) == 0x5a4d and $a }
+rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
+"#;
+
+    #[test]
+    fn feed_selection_keeps_only_rules_that_require_elf() {
+        let sel = select_feed_rules(FEED);
+        let kept: String = sel.rules.concat();
+        assert!(kept.contains("is_elf_helper") && kept.contains("Linux_Backdoor"));
+        assert!(!kept.contains("Linux_Module"), "ELF only mentioned in the description");
+        assert!(!kept.contains("Win_Thing") && !kept.contains("Socat"));
+        assert_eq!(sel.dropped, 3);
+    }
+
+    #[test]
+    fn feed_rules_only_count_on_elf_files() {
+        // A feed rule that matches its string anywhere, compiled directly so
+        // the selection can't remove it.
+        let mut c = Compiler::new();
+        c.new_namespace("feed_x");
+        c.add_source(r#"rule Anywhere { meta: score = 95 strings: $a = "evilstring" condition: $a }"#).unwrap();
+        let rules = YaraRules { rules: Some(c.build()), count: 1 };
+        assert!(rules.scan(b"notes: evilstring in a text file").is_none());
+        let mut elf = b"\x7fELF".to_vec();
+        elf.extend_from_slice(b"....evilstring....");
+        assert!(rules.scan(&elf).is_some());
+    }
 }
