@@ -85,6 +85,9 @@ impl YaraRules {
         };
         let mut best: Option<Match> = None;
         for rule in results.matching_rules() {
+            if !rule.namespace().starts_with(BUNDLED_PREFIX) && is_test_file_rule(rule.identifier()) {
+                continue;
+            }
             let mut severity = None;
             let mut confirmed = false;
             let mut score = None;
@@ -125,6 +128,15 @@ impl YaraRules {
         }
         best
     }
+}
+
+/// Feed rules for anti-malware test files (EICAR) match the test string
+/// anywhere in a file, so they fire on documentation, chat caches and browser
+/// memory that merely mention it — seen on 2026-09-30 in Chromium shared
+/// memory. The bundled Qlam_Test_EICAR rule covers the real test file (the
+/// string at offset 0 of a tiny file), so feed ones are ignored.
+pub fn is_test_file_rule(identifier: &str) -> bool {
+    identifier.to_ascii_lowercase().contains("eicar")
 }
 
 pub fn check_source(src: &str) -> Result<(), String> {

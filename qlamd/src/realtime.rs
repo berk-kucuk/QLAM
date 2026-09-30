@@ -47,6 +47,28 @@ const SKIP_FSTYPES: &[&str] = &[
     "efivarfs", "nsfs", "rpc_pipefs", "ramfs", "squashfs",
 ];
 
+/// Name prefixes of the shared-memory files Chromium and every Electron app
+/// keep in /dev/shm. They back IPC and rendering buffers — whatever the app
+/// is displaying, a web page or a chat that quotes the EICAR string — are
+/// created and rewritten constantly, and are mapped, never executed. Their
+/// writes are not scanned; an exec from one is still checked.
+const BROWSER_SHM_PREFIXES: &[&str] = &[
+    ".org.chromium.Chromium.",
+    ".com.google.Chrome.",
+    ".com.microsoft.Edge.",
+    ".com.brave.Browser.",
+    ".com.vivaldi.Vivaldi.",
+    ".com.opera.Opera.",
+];
+
+fn is_browser_shm(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/dev/shm"))
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| BROWSER_SHM_PREFIXES.iter().any(|p| n.starts_with(p)))
+}
+
 /// Same path written again within this window is not rescanned; editors and
 /// downloaders close a file many times in a burst.
 const WRITE_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -522,6 +544,9 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
                     s.answer(e.0.ticket, true);
                 }
             } else if m.mask & libc::FAN_CLOSE_WRITE != 0 {
+                if is_browser_shm(&path) {
+                    continue;
+                }
                 let now = Instant::now();
                 if recent.get(&path).is_some_and(|t| now.duration_since(*t) < WRITE_DEBOUNCE) {
                     continue;
@@ -790,6 +815,17 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(reopen(&path, &key).is_none(), "deleted file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browser_shared_memory_is_recognised() {
+        assert!(is_browser_shm(Path::new("/dev/shm/.org.chromium.Chromium.UmufvK")));
+        assert!(is_browser_shm(Path::new("/dev/shm/.com.google.Chrome.a1b2c3")));
+        // Only directly in /dev/shm, and only these names.
+        assert!(!is_browser_shm(Path::new("/dev/shm/sub/.org.chromium.Chromium.x")));
+        assert!(!is_browser_shm(Path::new("/tmp/.org.chromium.Chromium.x")));
+        assert!(!is_browser_shm(Path::new("/dev/shm/payload")));
+        assert!(!is_browser_shm(Path::new("/dev/shm/.org.chromium")));
     }
 
     #[test]

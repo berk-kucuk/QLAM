@@ -258,7 +258,7 @@ fn keep_compilable(src: &str) -> (String, usize, usize) {
     let mut dropped = 0;
     for (i, &(start, name)) in heads.iter().enumerate() {
         let end = heads.get(i + 1).map(|h| h.0).unwrap_or(src.len());
-        if DUAL_USE.is_match(name) {
+        if DUAL_USE.is_match(name) || crate::engine::yara::is_test_file_rule(name) {
             dropped += 1;
         } else {
             rules.push(&src[start..end]);
@@ -332,9 +332,10 @@ mod tests {
 
     #[test]
     fn drops_only_broken_rules() {
-        let src = "import \"pe\"\nrule good { condition: true }\nrule bad { condition: nosuchthing }\nrule good2 { strings: $a = \"x\" condition: $a }\nrule ELASTIC_Linux_Hacktool_Socat { condition: true }\n";
+        let src = "import \"pe\"\nrule good { condition: true }\nrule bad { condition: nosuchthing }\nrule good2 { strings: $a = \"x\" condition: $a }\nrule ELASTIC_Linux_Hacktool_Socat { condition: true }\nrule TRELLIX_ARC_Malw_Eicar { condition: true }\n";
         let (out, kept, dropped) = keep_compilable(src);
-        assert_eq!((kept, dropped), (2, 2));
+        assert_eq!((kept, dropped), (2, 3));
+        assert!(!out.contains("Eicar"));
         assert!(out.contains("good2") && !out.contains("nosuchthing") && !out.contains("Socat"));
     }
 }
