@@ -102,6 +102,10 @@ QWidget {{
     selection-color: {text};
 }}
 
+/* ── Window frame (Qlam draws its own title bar) ────────── */
+#WindowFrame {{ background-color: {bg}; border: 1px solid {border2}; }}
+#WindowFrame[winstate="max"] {{ border: none; }}
+
 /* ── Title bar ─────────────────────────────────────────── */
 #TitleBar {{
     background-color: {bg};

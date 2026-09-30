@@ -186,6 +186,12 @@ class SettingsPage(QWidget):
         self.theme_box.setCurrentIndex(0 if theme.name == "dark" else 1)
         self._loading = False
 
+    def sync_theme(self):
+        """Follow a theme change made elsewhere (the title bar)."""
+        self._loading = True
+        self.theme_box.setCurrentIndex(0 if theme.name == "dark" else 1)
+        self._loading = False
+
     def _pref(self, key, value):
         if not self._loading:
             save_pref(key, value)

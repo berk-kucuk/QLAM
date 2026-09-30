@@ -4,8 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import qtawesome as qta
-from PyQt6.QtCore import QSize, Qt, QTimer
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
     QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
@@ -18,7 +18,8 @@ from ui.overview_page import OverviewPage
 from ui.quarantine_page import QuarantinePage
 from ui.scan_page import ScanPage
 from ui.settings_page import SettingsPage
-from ui.theme import load_prefs, theme
+from ui.theme import load_prefs, save_theme, theme
+from ui.titlebar import ResizeGrips, TitleBar
 from ui.widgets import headline, level, short_path
 
 _LOGOS = Path(__file__).resolve().parent.parent / "Logos"
@@ -73,6 +74,9 @@ class MainWindow(QMainWindow):
     def __init__(self, session_bus: bool = False):
         super().__init__()
         self.setWindowTitle("Qlam")
+        # Qlam draws its own title bar (ui/titlebar.py) instead of the window
+        # manager's, so it looks the same on every desktop.
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setMinimumSize(1000, 660)
         self.resize(1180, 760)
 
@@ -102,27 +106,26 @@ class MainWindow(QMainWindow):
     # ── Layout ────────────────────────────────────────────────────────────
 
     def _build(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        lay = QHBoxLayout(central)
+        frame = QWidget()
+        frame.setObjectName("WindowFrame")
+        self.setCentralWidget(frame)
+        outer = QVBoxLayout(frame)
+        outer.setContentsMargins(1, 1, 1, 1)  # room for the 1px window border
+        outer.setSpacing(0)
+        self.titlebar = TitleBar(self)
+        self.titlebar.theme_toggled.connect(self._toggle_theme)
+        outer.addWidget(self.titlebar)
+        body = QWidget()
+        outer.addWidget(body, 1)
+        lay = QHBoxLayout(body)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
         side = QWidget()
         side.setObjectName("Sidebar")
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(14, 22, 14, 16)
+        sl.setContentsMargins(14, 18, 14, 16)
         sl.setSpacing(4)
-        brand = QHBoxLayout()
-        brand.setContentsMargins(8, 0, 0, 0)
-        self.logo = QLabel()
-        brand.addWidget(self.logo)
-        name = QLabel("QLAM")
-        name.setObjectName("BrandName")
-        brand.addWidget(name)
-        brand.addStretch(1)
-        sl.addLayout(brand)
-        sl.addSpacing(22)
 
         self.nav: dict[str, _NavButton] = {}
         for key, icon, text in _NAV:
@@ -161,20 +164,35 @@ class MainWindow(QMainWindow):
         self.scan.show_findings.connect(lambda: self._nav_to("findings"))
         self.findings.changed.connect(self._after_decision)
         self.quarantine.changed.connect(self._after_decision)
+        self._frame = frame
+        self._grips = ResizeGrips(self)
         self._retint()
 
+    # ── Window chrome ─────────────────────────────────────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._grips.place()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            # A maximized window has no border and can't be resized.
+            maximized = self.isMaximized() or self.isFullScreen()
+            # ("maximized" itself is a read-only QWidget property.)
+            self._frame.setProperty("winstate", "max" if maximized else "normal")
+            self._frame.style().unpolish(self._frame)
+            self._frame.style().polish(self._frame)
+            self._frame.layout().setContentsMargins(*([0] * 4 if maximized else [1] * 4))
+            self._grips.place()
+            self.titlebar.retint()
+
+    def _toggle_theme(self):
+        theme.toggle()
+        save_theme(theme.name)
+        self.settings.sync_theme()
+
     def _retint(self):
-        logo = _LOGOS / "qlam_transparent.png"
-        if logo.exists():
-            # The logo is a single-colour mark: paint it in the text colour
-            # so it shows on both themes.
-            pm = QPixmap(str(logo)).scaled(26, 26, Qt.AspectRatioMode.KeepAspectRatio,
-                                           Qt.TransformationMode.SmoothTransformation)
-            painter = QPainter(pm)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-            painter.fillRect(pm.rect(), QColor(theme.p["text"]))
-            painter.end()
-            self.logo.setPixmap(pm)
         for k, b in self.nav.items():
             b.set_active(self.stack.currentWidget() is self.pages.get(k))
 
@@ -214,6 +232,15 @@ class MainWindow(QMainWindow):
         self.overview.set_status(st, ok)
         self.settings.set_status(st if ok else {})
         rt = st.get("realtime", {}) if ok else {}
+        open_n = int(st.get("user", {}).get("open_findings", 0)) if ok else 0
+        if not ok:
+            self.titlebar.set_status("Service not running", "warn")
+        elif open_n:
+            self.titlebar.set_status(f"{open_n} to review", "bad")
+        elif rt.get("active"):
+            self.titlebar.set_status("Protected", "good")
+        else:
+            self.titlebar.set_status("Real-time protection off", "warn")
         if not ok:
             self.footer.setText("Service not running")
         elif rt.get("active"):
