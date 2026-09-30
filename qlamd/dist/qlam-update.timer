@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Qlam signature feed update
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1d
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.maze.Qlam1
+Exec=/bin/false
+User=root
+SystemdService=qlamd.service

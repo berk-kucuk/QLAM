@@ -1,455 +1,212 @@
-import json
+"""Settings: protection (system-wide, needs admin) and this user's preferences."""
+from __future__ import annotations
+
 from pathlib import Path
 
-import qtawesome as qta
-from PyQt6.QtCore import pyqtSignal, QSize, Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QCheckBox, QTextEdit, QMessageBox, QScrollArea,
-    QFrame, QSizePolicy, QLineEdit, QComboBox, QTimeEdit,
+    QCheckBox, QComboBox, QHBoxLayout, QMessageBox, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
-from PyQt6.QtCore import QTime
 
-from core.database_manager import DatabaseManager
-from ui.theme import theme
+from ui.theme import load_prefs, save_pref, save_theme, theme
+from ui.widgets import Card, ago, label, page_header
 
-SETTINGS_FILE = Path.home() / ".local" / "share" / "Qlam" / "settings.json"
-AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "qlam.desktop"
-
-DEFAULTS = {
-    "max_file_size_mb": 100,
-    "scan_archives": True,
-    "follow_symlinks": False,
-    "recursive_scan": True,
-    "auto_quarantine": True,
-    "realtime_enabled": False,
-    "realtime_paths": [
-        str(Path.home() / "Downloads"),
-        str(Path.home() / "Desktop"),
-        "/tmp",
-    ],
-    "notify_on_threat": True,
-    "autostart": False,
-    "scheduled_scan_enabled": False,
-    "scheduled_scan_type": "quick",
-    "scheduled_scan_trigger": "startup",
-    "scheduled_scan_time": "02:00",
-}
-
-def _section_card(title: str, icon_name: str) -> tuple[QFrame, QVBoxLayout]:
-    card = QFrame()
-    card.setObjectName("Card")
-    lay = QVBoxLayout(card)
-    lay.setContentsMargins(20, 16, 20, 18)
-    lay.setSpacing(14)
-
-    header = QHBoxLayout()
-    header.setSpacing(10)
-    icon_lbl = QLabel()
-    icon_lbl.setPixmap(qta.icon(icon_name, color=theme.p["text_mid"]).pixmap(QSize(15, 15)))
-    header.addWidget(icon_lbl)
-    title_lbl = QLabel(title)
-    title_lbl.setObjectName("Strong")
-    header.addWidget(title_lbl)
-    header.addStretch()
-    lay.addLayout(header)
-
-    sep = QFrame()
-    sep.setFrameShape(QFrame.Shape.HLine)
-    sep.setFixedHeight(1)
-    lay.addWidget(sep)
-
-    return card, lay
+_AUTOSTART_OVERRIDE = Path.home() / ".config" / "autostart" / "qlam-tray.desktop"
 
 
-class _NumberInput(QLineEdit):
-    """Plain text input for numeric values with validation."""
-    def __init__(self, min_val: int, max_val: int, suffix: str = "", parent=None):
+class _Toggle(QWidget):
+    """Checkbox with a title and an explanation underneath."""
+
+    def __init__(self, title: str, text: str, parent=None):
         super().__init__(parent)
-        self._min = min_val
-        self._max = max_val
-        self._suffix = suffix
-        self._value = min_val
-        self.setFixedWidth(110)
-        self.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.editingFinished.connect(self._on_edited)
-        self._refresh()
-
-    def value(self) -> int:
-        return self._value
-
-    def setValue(self, v: int):
-        self._value = max(self._min, min(self._max, v))
-        self._refresh()
-
-    def _on_edited(self):
-        try:
-            text = self.text().replace(self._suffix, "").strip()
-            self._value = max(self._min, min(self._max, int(text)))
-        except ValueError:
-            pass
-        self._refresh()
-
-    def _refresh(self):
-        self.setText(f"{self._value}{self._suffix}")
-
-
-def _row(lay: QVBoxLayout, label: str, widget: QWidget, hint: str = ""):
-    row = QHBoxLayout()
-    row.setSpacing(16)
-    lbl = QLabel(label)
-    lbl.setObjectName("Muted")
-    lbl.setFixedWidth(180)
-    row.addWidget(lbl)
-    row.addWidget(widget)
-    row.addStretch()
-    lay.addLayout(row)
-    if hint:
-        hint_lbl = QLabel(hint)
-        hint_lbl.setObjectName("Dim")
-        hint_lbl.setContentsMargins(196, 0, 0, 0)
-        lay.addWidget(hint_lbl)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 4, 0, 4)
+        lay.setSpacing(3)
+        self.box = QCheckBox(title)
+        self.box.setStyleSheet("font-weight: 600;")
+        lay.addWidget(self.box)
+        t = label(text, "Muted", wrap=True)
+        t.setContentsMargins(27, 0, 0, 0)
+        lay.addWidget(t)
 
 
 class SettingsPage(QWidget):
-    settings_changed = pyqtSignal(dict)
+    prefs_changed = pyqtSignal()
 
-    def __init__(self, db_manager: DatabaseManager, parent=None):
+    def __init__(self, client, parent=None):
         super().__init__(parent)
-        self._db_manager = db_manager
-        self._settings = self._load()
-        self._build_ui()
-        self._apply_to_ui()
+        self.client = client
+        self._loading = False
 
-        db_manager.update_output.connect(self._on_update_output)
-        db_manager.update_finished.connect(self._on_update_finished)
-
-    def _build_ui(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        # Scrollable content
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-
-        content = QWidget()
-        root = QVBoxLayout(content)
-        root.setContentsMargins(32, 24, 32, 32)
-        root.setSpacing(14)
-
-        title = QLabel("Settings")
-        title.setObjectName("PageTitle")
-        root.addWidget(title)
-
-        sub = QLabel("Scan behavior, real-time protection and database updates")
-        sub.setObjectName("PageSubtitle")
-        root.addWidget(sub)
-        root.addSpacing(8)
-
-        # ── Scan Options card ─────────────────────────────────────────────
-        card1, c1 = _section_card("Scan Options", "fa5s.sliders-h")
-
-        self._max_size_spin = _NumberInput(1, 4096, " MB")
-        _row(c1, "Max file size", self._max_size_spin,
-             "Files larger than this are skipped")
-
-        self._archives_chk = QCheckBox("Scan inside archives  (zip, tar, gz...)")
-        c1.addWidget(self._archives_chk)
-
-        self._symlinks_chk = QCheckBox("Follow symbolic links")
-        c1.addWidget(self._symlinks_chk)
-
-        self._recursive_chk = QCheckBox("Recursive directory scanning")
-        c1.addWidget(self._recursive_chk)
-
-        self._auto_quarantine_chk = QCheckBox("Automatically quarantine detected threats")
-        c1.addWidget(self._auto_quarantine_chk)
-
-        root.addWidget(card1)
-
-        # ── Notifications card ────────────────────────────────────────────
-        card2, c2 = _section_card("Notifications", "fa5s.bell")
-
-        self._notify_chk = QCheckBox("Show desktop notification when a threat is detected")
-        c2.addWidget(self._notify_chk)
-
-        root.addWidget(card2)
-
-        # ── Autostart card ────────────────────────────────────────────────
-        card_auto, c_auto = _section_card("System Startup", "fa5s.power-off")
-
-        self._autostart_chk = QCheckBox(
-            "Launch Qlam automatically when the system starts  (runs in system tray)"
-        )
-        c_auto.addWidget(self._autostart_chk)
-
-        root.addWidget(card_auto)
-
-        # ── Scheduled Scan card ───────────────────────────────────────────
-        card_sched, c_sched = _section_card("Scheduled Scan", "fa5s.calendar-alt")
-
-        self._sched_enabled_chk = QCheckBox("Enable scheduled automatic scan")
-        self._sched_enabled_chk.toggled.connect(self._on_sched_toggled)
-        c_sched.addWidget(self._sched_enabled_chk)
-
-        # Scan type row
-        stype_row = QHBoxLayout()
-        stype_lbl = QLabel("Scan type:")
-        stype_lbl.setObjectName("Muted")
-        stype_lbl.setFixedWidth(120)
-        stype_row.addWidget(stype_lbl)
-        self._sched_type_combo = QComboBox()
-        self._sched_type_combo.addItems(["Quick Scan", "Full Scan"])
-        self._sched_type_combo.setFixedWidth(140)
-        stype_row.addWidget(self._sched_type_combo)
-        stype_row.addStretch()
-        c_sched.addLayout(stype_row)
-
-        # Trigger row
-        trig_row = QHBoxLayout()
-        trig_lbl = QLabel("Run:")
-        trig_lbl.setObjectName("Muted")
-        trig_lbl.setFixedWidth(120)
-        trig_row.addWidget(trig_lbl)
-        self._sched_trigger_combo = QComboBox()
-        self._sched_trigger_combo.addItems(["On system startup", "At a specific time"])
-        self._sched_trigger_combo.setFixedWidth(200)
-        self._sched_trigger_combo.currentIndexChanged.connect(self._on_trigger_changed)
-        trig_row.addWidget(self._sched_trigger_combo)
-        trig_row.addStretch()
-        c_sched.addLayout(trig_row)
-
-        # Time picker (only visible when "At a specific time" is selected)
-        time_row = QHBoxLayout()
-        time_lbl = QLabel("Time:")
-        time_lbl.setObjectName("Muted")
-        time_lbl.setFixedWidth(120)
-        time_row.addWidget(time_lbl)
-        self._sched_time_edit = QTimeEdit()
-        self._sched_time_edit.setDisplayFormat("HH:mm")
-        self._sched_time_edit.setFixedWidth(90)
-        time_row.addWidget(self._sched_time_edit)
-        time_row.addStretch()
-        self._time_row_widget = QWidget()
-        self._time_row_widget.setLayout(time_row)
-        c_sched.addWidget(self._time_row_widget)
-
-        root.addWidget(card_sched)
-
-        # ── Real-time Paths card ──────────────────────────────────────────
-        card3, c3 = _section_card("Real-time Protection — Watched Paths", "fa5s.eye")
-
-        self._rt_enabled_chk = QCheckBox("Enable real-time protection")
-        self._rt_enabled_chk.toggled.connect(self._on_rt_enabled_toggled)
-        c3.addWidget(self._rt_enabled_chk)
-
-        hint = QLabel("One path per line. Qlam monitors these directories for new or modified files.")
-        hint.setObjectName("Dim")
-        hint.setWordWrap(True)
-        c3.addWidget(hint)
-
-        self._rt_paths_edit = QTextEdit()
-        self._rt_paths_edit.setFixedHeight(96)
-        c3.addWidget(self._rt_paths_edit)
-
-        root.addWidget(card3)
-
-        # ── Virus Database card ───────────────────────────────────────────
-        card4, c4 = _section_card("Virus Database", "fa5s.database")
-
-        update_row = QHBoxLayout()
-        self._update_btn = QPushButton("   Update Now")
-        self._update_btn.setObjectName("PrimaryButton")
-        self._update_btn.setIcon(qta.icon("fa5s.sync-alt", color=theme.p["accent_text"]))
-        self._update_btn.setIconSize(QSize(13, 13))
-        self._update_btn.setFixedWidth(160)
-        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._update_btn.clicked.connect(lambda: self._run_update())
-        update_row.addWidget(self._update_btn)
-
-        self._update_status = QLabel("Runs freshclam to fetch the latest signatures")
-        self._update_status.setObjectName("Dim")
-        update_row.addWidget(self._update_status)
-        update_row.addStretch()
-        c4.addLayout(update_row)
-
-        self._update_log = QTextEdit()
-        self._update_log.setReadOnly(True)
-        self._update_log.setFixedHeight(110)
-        self._update_log.setPlaceholderText("Update output will appear here...")
-        c4.addWidget(self._update_log)
-
-        root.addWidget(card4)
-        root.addSpacing(8)
-
-        # Save button
-        save_row = QHBoxLayout()
-        save_btn = QPushButton("   Save Settings")
-        save_btn.setObjectName("PrimaryButton")
-        save_btn.setIcon(qta.icon("fa5s.check", color=theme.p["accent_text"]))
-        save_btn.setIconSize(QSize(13, 13))
-        save_btn.setMinimumWidth(160)
-        save_btn.setMinimumHeight(44)
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.clicked.connect(self._save_and_emit)
-        save_row.addWidget(save_btn)
-        save_row.addStretch()
-        root.addLayout(save_row)
-        root.addStretch()
-
-        scroll.setWidget(content)
         outer.addWidget(scroll)
+        inner = QWidget()
+        scroll.setWidget(inner)
+        root = QVBoxLayout(inner)
+        root.setContentsMargins(36, 30, 36, 30)
+        root.setSpacing(18)
+        root.addWidget(page_header("Settings", "Protection settings apply to everyone on this computer "
+                                               "and ask for an administrator password."))
 
-    # ── Public ────────────────────────────────────────────────────────────
+        # ── Protection ────────────────────────────────────────────────────
+        prot = Card()
+        prot.body.addWidget(label("PROTECTION", "SectionLabel"))
+        self.t_rt = _Toggle("Real-time protection",
+                            "Check files as they are downloaded or created, and before they run.")
+        self.t_block = _Toggle("Stop known malware from running",
+                               "Only files identical to a known malware sample are stopped. "
+                               "Anything less certain is shown to you as a warning and still runs.")
+        self.t_autoq = _Toggle("Move known malware to quarantine automatically",
+                               "Off by default: Qlam tells you and you decide. When on, this applies only "
+                               "to exact matches with known malware, never to pattern-based warnings.")
+        for t, key in ((self.t_rt, "realtime"), (self.t_block, "block_exec"), (self.t_autoq, "auto_quarantine")):
+            t.box.toggled.connect(lambda on, k=key, box=t.box: self._set_option(k, on, box))
+            prot.body.addWidget(t)
+        root.addWidget(prot)
 
-    def get_settings(self) -> dict:
-        return dict(self._settings)
+        # ── Signatures ────────────────────────────────────────────────────
+        sig = Card()
+        sig.body.addWidget(label("SIGNATURES", "SectionLabel"))
+        self.sig_text = label("", "Muted", wrap=True)
+        sig.body.addWidget(self.sig_text)
+        r = QHBoxLayout()
+        self.b_update = QPushButton("Update now")
+        self.b_update.setObjectName("GhostButton")
+        self.b_update.clicked.connect(self._update)
+        r.addWidget(self.b_update)
+        r.addStretch(1)
+        sig.body.addLayout(r)
+        root.addWidget(sig)
 
-    def set_realtime_enabled(self, enabled: bool):
-        """Reflect the live real-time state in the checkbox and persist it, so
-        the Settings page and Dashboard never disagree (e.g. after toggling
-        protection from the Dashboard). Does not pop the 'saved' dialog."""
-        if self._settings.get("realtime_enabled") == enabled and \
-                self._rt_enabled_chk.isChecked() == enabled:
-            return
-        self._rt_enabled_chk.blockSignals(True)
-        self._rt_enabled_chk.setChecked(enabled)
-        self._rt_enabled_chk.blockSignals(False)
-        self._on_rt_enabled_toggled(enabled)
-        self._settings["realtime_enabled"] = enabled
-        self._persist()
+        # ── This user ─────────────────────────────────────────────────────
+        me = Card()
+        me.body.addWidget(label("YOUR PREFERENCES", "SectionLabel"))
+        self.t_tray = _Toggle("Start Qlam in the tray when I log in",
+                              "Needed to see warnings as pop-ups. Protection itself runs either way.")
+        self.t_tray.box.toggled.connect(self._set_autostart)
+        me.body.addWidget(self.t_tray)
+        self.t_notice = _Toggle("Pop up for minor notices too",
+                                "By default only real warnings pop up; minor notices wait in Findings.")
+        self.t_notice.box.toggled.connect(lambda on: self._pref("notify_notices", on))
+        me.body.addWidget(self.t_notice)
+        tr = QHBoxLayout()
+        tr.addWidget(label("Appearance", "Strong"))
+        tr.addStretch(1)
+        self.theme_box = QComboBox()
+        self.theme_box.addItems(["Dark", "Light"])
+        self.theme_box.currentIndexChanged.connect(self._set_theme)
+        tr.addWidget(self.theme_box)
+        me.body.addLayout(tr)
+        root.addWidget(me)
 
-    def realtime_paths(self) -> list[str]:
-        return list(self._settings.get("realtime_paths", []))
+        # ── About ─────────────────────────────────────────────────────────
+        about = Card()
+        about.body.addWidget(label("ABOUT", "SectionLabel"))
+        self.about = label("", "Muted", wrap=True, selectable=True)
+        self.about.setTextFormat(Qt.TextFormat.RichText)
+        self.about.setOpenExternalLinks(True)
+        about.body.addWidget(self.about)
+        root.addWidget(about)
+        root.addStretch(1)
 
-    def _run_update(self):
-        self._update_btn.setEnabled(False)
-        self._update_status.setText("Waiting for authentication...")
-        self._update_status.setStyleSheet(f"color: {theme.p['text_mid']}; font-size: 12px;")
-        self._update_log.clear()
-        self._db_manager.run_update()
+        self._load_prefs()
 
-    # ── Internal ──────────────────────────────────────────────────────────
+    # ── Status → widgets ──────────────────────────────────────────────────
 
-    def _apply_to_ui(self):
-        s = self._settings
-        self._max_size_spin.setValue(s.get("max_file_size_mb", 100))
-        self._archives_chk.setChecked(s.get("scan_archives", True))
-        self._symlinks_chk.setChecked(s.get("follow_symlinks", False))
-        self._recursive_chk.setChecked(s.get("recursive_scan", True))
-        self._auto_quarantine_chk.setChecked(s.get("auto_quarantine", True))
-        self._notify_chk.setChecked(s.get("notify_on_threat", True))
-        self._autostart_chk.setChecked(s.get("autostart", False))
-        self._rt_enabled_chk.setChecked(s.get("realtime_enabled", False))
-        self._rt_paths_edit.setPlainText("\n".join(s.get("realtime_paths", [])))
-        self._on_rt_enabled_toggled(s.get("realtime_enabled", False))
+    def set_status(self, st: dict):
+        self._loading = True
+        rt = st.get("realtime", {})
+        self.t_rt.box.setChecked(bool(rt.get("enabled")))
+        self.t_block.box.setChecked(bool(rt.get("block_exec")))
+        self.t_autoq.box.setChecked(bool(rt.get("auto_quarantine")))
+        self._loading = False
+        on = bool(st)
+        for t in (self.t_rt, self.t_block, self.t_autoq):
+            t.setEnabled(on)
+        self.t_block.setEnabled(on and bool(rt.get("enabled")))
+        self.b_update.setEnabled(on)
 
-        enabled = s.get("scheduled_scan_enabled", False)
-        self._sched_enabled_chk.setChecked(enabled)
-        self._sched_type_combo.setCurrentIndex(
-            0 if s.get("scheduled_scan_type", "quick") == "quick" else 1
-        )
-        trigger = s.get("scheduled_scan_trigger", "startup")
-        self._sched_trigger_combo.setCurrentIndex(0 if trigger == "startup" else 1)
-        t = s.get("scheduled_scan_time", "02:00")
-        h, m = (int(x) for x in t.split(":"))
-        self._sched_time_edit.setTime(QTime(h, m))
-        self._on_sched_toggled(enabled)
-        self._on_trigger_changed(self._sched_trigger_combo.currentIndex())
-
-    def _collect_from_ui(self) -> dict:
-        paths = [
-            p.strip()
-            for p in self._rt_paths_edit.toPlainText().splitlines()
-            if p.strip()
+        eng, feeds = st.get("engines", {}), st.get("feeds", {})
+        lines = [
+            f"{int(eng.get('hashes', 0)):,} known malware samples (MalwareBazaar, family-attributed only)",
+            f"{int(eng.get('yara_rules', 0)):,} pattern rules (Qlam + YARA Forge core)",
+            "ClamAV engine: " + ("in use" if eng.get("clamav") else
+                                  "not running (optional — enable clamav-daemon for extra coverage, ~1 GB RAM)"),
+            f"Last update: {ago(feeds.get('updated_at'))}",
         ]
-        trigger = "startup" if self._sched_trigger_combo.currentIndex() == 0 else "time"
-        t = self._sched_time_edit.time()
-        return {
-            "max_file_size_mb": self._max_size_spin.value(),
-            "scan_archives": self._archives_chk.isChecked(),
-            "follow_symlinks": self._symlinks_chk.isChecked(),
-            "recursive_scan": self._recursive_chk.isChecked(),
-            "auto_quarantine": self._auto_quarantine_chk.isChecked(),
-            "realtime_enabled": self._rt_enabled_chk.isChecked(),
-            "realtime_paths": paths,
-            "notify_on_threat": self._notify_chk.isChecked(),
-            "autostart": self._autostart_chk.isChecked(),
-            "scheduled_scan_enabled": self._sched_enabled_chk.isChecked(),
-            "scheduled_scan_type": "quick" if self._sched_type_combo.currentIndex() == 0 else "full",
-            "scheduled_scan_trigger": trigger,
-            "scheduled_scan_time": f"{t.hour():02d}:{t.minute():02d}",
-        }
+        if feeds.get("errors"):
+            lines.append("Last update had problems: " + "; ".join(feeds["errors"]))
+        self.sig_text.setText("\n".join(lines))
+        self.about.setText(
+            f"Qlam {st.get('version', '?')} · open source, MIT licensed<br>"
+            "Detection data: MalwareBazaar (abuse.ch), YARA Forge, optionally ClamAV.<br>"
+            '<a href="https://github.com/berk-kucuk/QLAM">github.com/berk-kucuk/QLAM</a>')
 
-    def _save_and_emit(self):
-        self._settings = self._collect_from_ui()
-        self._persist()
-        self._apply_autostart(self._settings.get("autostart", False))
-        self.settings_changed.emit(dict(self._settings))
-        QMessageBox.information(self, "Qlam", "Settings saved.")
+    # ── Actions ───────────────────────────────────────────────────────────
 
-    def _on_sched_toggled(self, enabled: bool):
-        for w in (self._sched_type_combo, self._sched_trigger_combo, self._time_row_widget):
-            w.setEnabled(enabled)
-        if enabled:
-            self._on_trigger_changed(self._sched_trigger_combo.currentIndex())
+    def _set_option(self, key: str, on: bool, box: QCheckBox):
+        if self._loading:
+            return
+        box.setEnabled(False)
 
-    def _on_trigger_changed(self, index: int):
-        show_time = (index == 1) and self._sched_enabled_chk.isChecked()
-        self._time_row_widget.setVisible(show_time)
+        def failed(msg):
+            box.setEnabled(True)
+            self._loading = True
+            box.setChecked(not on)
+            self._loading = False
+            QMessageBox.warning(self, "Qlam", msg)
 
-    def _on_rt_enabled_toggled(self, enabled: bool):
-        self._rt_paths_edit.setEnabled(enabled)
+        self.client.set_option(key, on, done=lambda _r: (box.setEnabled(True), self.client.refresh_status()),
+                               fail=failed)
 
-    @staticmethod
-    def _apply_autostart(enable: bool):
-        AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
-        launcher = Path.home() / ".local" / "bin" / "qlam"
-        # Fall back to running main.py directly if launcher not installed
-        if not launcher.exists():
-            import sys
-            from pathlib import Path as P
-            launcher = P(sys.argv[0]).resolve()
-        if enable:
-            AUTOSTART_FILE.write_text(
-                "[Desktop Entry]\n"
-                "Name=Qlam\n"
-                f"Exec={launcher} --tray\n"
-                "Type=Application\n"
-                "Categories=System;Security;\n"
-                "Comment=Qlam antivirus — background protection\n"
-                "X-GNOME-Autostart-enabled=true\n"
-                "Hidden=false\n"
-            )
-        else:
-            AUTOSTART_FILE.unlink(missing_ok=True)
+    def _update(self):
+        self.b_update.setEnabled(False)
+        self.b_update.setText("Updating…")
 
-    def _on_update_output(self, line: str):
-        self._update_log.append(
-            f'<span style="color:{theme.p["text_mid"]};">{line}</span>')
+        def finish(msg=None):
+            self.b_update.setEnabled(True)
+            self.b_update.setText("Update now")
+            if msg:
+                QMessageBox.warning(self, "Qlam", msg)
 
-    def _on_update_finished(self, success: bool, message: str):
-        self._update_btn.setEnabled(True)
-        color = theme.p["good"] if success else theme.p["bad"]
-        self._update_status.setText(message)
-        self._update_status.setStyleSheet(f"color: {color}; font-size: 12px;")
-        self._update_log.append(
-            f'<span style="color:{color}; font-weight:600;">{message}</span>'
-        )
+        # The update runs in the background as its own service; the status
+        # refreshes by itself when new signatures are loaded.
+        self.client.update_signatures(done=lambda _r: finish(), fail=finish)
 
-    @staticmethod
-    def _load() -> dict:
-        if SETTINGS_FILE.exists():
-            try:
-                with open(SETTINGS_FILE) as f:
-                    return {**DEFAULTS, **json.load(f)}
-            except Exception:
-                pass
-        return dict(DEFAULTS)
+    def _load_prefs(self):
+        prefs = load_prefs()
+        self._loading = True
+        self.t_notice.box.setChecked(bool(prefs.get("notify_notices", False)))
+        self.t_tray.box.setChecked(not _AUTOSTART_OVERRIDE.exists())
+        self.theme_box.setCurrentIndex(0 if theme.name == "dark" else 1)
+        self._loading = False
 
-    def _persist(self):
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(self._settings, f, indent=2)
+    def _pref(self, key, value):
+        if not self._loading:
+            save_pref(key, value)
+            self.prefs_changed.emit()
+
+    def _set_theme(self, idx: int):
+        if self._loading:
+            return
+        name = "dark" if idx == 0 else "light"
+        theme.set(name)
+        save_theme(name)
+
+    def _set_autostart(self, on: bool):
+        """The package starts the tray for everyone via /etc/xdg/autostart;
+        a user opts out with a Hidden=true override in their own autostart."""
+        if self._loading:
+            return
+        try:
+            if on:
+                _AUTOSTART_OVERRIDE.unlink(missing_ok=True)
+            else:
+                _AUTOSTART_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+                _AUTOSTART_OVERRIDE.write_text("[Desktop Entry]\nType=Application\nName=Qlam\nHidden=true\n")
+        except OSError as e:
+            QMessageBox.warning(self, "Qlam", f"Could not change autostart: {e.strerror}")

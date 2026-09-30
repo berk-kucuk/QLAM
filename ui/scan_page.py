@@ -1,326 +1,236 @@
-from pathlib import Path
+"""On-demand scans, run by the daemon so they continue if the window closes."""
+from __future__ import annotations
+
+import os
 
 import qtawesome as qta
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QTextEdit, QFrame, QFileDialog,
+    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+    QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ui.theme import theme
+from ui.widgets import Card, Chip, label, page_header, short_path, when
+
+_KINDS = {
+    "quick": ("fa5s.bolt", "Quick scan",
+              "Downloads, desktop, startup entries and temporary folders — where new "
+              "malware lands first. About a minute."),
+    "home": ("fa5s.home", "Home folder",
+             "Every file in your home folder, hidden ones included. Can take a while."),
+    "custom": ("fa5s.folder-open", "Choose a folder",
+               "Scan a folder of your choice, such as a USB stick."),
+}
 
 
-class _ScanOptionCard(QFrame):
-    clicked = pyqtSignal()
+class _Option(Card):
+    clicked = pyqtSignal(str)
 
-    def __init__(self, icon_name: str, title: str, desc: str, parent=None):
+    def __init__(self, kind: str, parent=None):
         super().__init__(parent)
-        self._icon_name = icon_name
-        self._hovered = False
+        self.kind = kind
+        icon, title, text = _KINDS[kind]
+        self._icon = icon
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(190, 128)
+        top = QHBoxLayout()
+        self.ic = QLabel()
+        top.addWidget(self.ic)
+        top.addWidget(label(title, "Strong"), 1)
+        if kind == "quick":
+            top.addWidget(Chip("Recommended", "good"))
+        self.body.addLayout(top)
+        self.body.addWidget(label(text, "Muted", wrap=True))
+        self.body.addStretch(1)
+        self.setMinimumHeight(118)
+        self.retint()
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 22, 0, 18)
-        lay.setSpacing(8)
-        lay.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+    def retint(self):
+        self.ic.setPixmap(qta.icon(self._icon, color=theme.p["text"]).pixmap(QSize(16, 16)))
 
-        self._icon_lbl = QLabel()
-        self._icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._icon_lbl.setStyleSheet("background: transparent; border: none;")
-        lay.addWidget(self._icon_lbl)
-
-        self._title_lbl = QLabel(title)
-        self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        lay.addWidget(self._title_lbl)
-
-        self._desc_lbl = QLabel(desc)
-        self._desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._desc_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        lay.addWidget(self._desc_lbl)
-
-        theme.changed.connect(lambda _p: self._refresh_style())
-        self._refresh_style()
-
-    def _refresh_style(self):
-        p = theme.p
-        if self._hovered:
-            bg, border, tcol, icol = p["elevated"], p["accent"], p["text"], p["text"]
-        else:
-            bg, border, tcol, icol = p["surface"], p["border"], p["text_mid"], p["text_mid"]
-        self.setStyleSheet(
-            f"QFrame {{ background-color: {bg}; border: 1px solid {border};"
-            f" border-radius: 14px; }}")
-        self._title_lbl.setStyleSheet(
-            f"background: transparent; border: none; color: {tcol};"
-            f" font-weight: 600; font-size: 13px;")
-        self._desc_lbl.setStyleSheet(
-            f"background: transparent; border: none; color: {p['text_dim']}; font-size: 11px;")
-        self._icon_lbl.setPixmap(qta.icon(self._icon_name, color=icol).pixmap(QSize(28, 28)))
-
-    def mousePressEvent(self, event):
-        self.clicked.emit()
-
-    def enterEvent(self, event):
-        self._hovered = True
-        self._refresh_style()
-
-    def leaveEvent(self, event):
-        self._hovered = False
-        self._refresh_style()
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.clicked.emit(self.kind)
+        super().mousePressEvent(e)
 
 
 class ScanPage(QWidget):
-    scan_requested = pyqtSignal(str, list, bool)
-    abort_requested = pyqtSignal()
+    show_findings = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, client, parent=None):
         super().__init__(parent)
-        self._is_scanning = False
-        self._threats = 0
-        self._elapsed_secs = 0
-        self._build_ui()
-        theme.changed.connect(lambda _p: self._apply_theme())
-        self._apply_theme()
+        self.client = client
+        self.current: str | None = None
 
-    def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 24, 32, 32)
-        root.setSpacing(0)
+        root.setContentsMargins(36, 30, 36, 30)
+        root.setSpacing(18)
+        root.addWidget(page_header("Scan", "Real-time protection checks new files as they arrive. "
+                                           "Scans check what was already there."))
 
-        title = QLabel("Scan")
-        title.setObjectName("PageTitle")
-        root.addWidget(title)
+        opts = QHBoxLayout()
+        opts.setSpacing(14)
+        self.options = [_Option(k) for k in ("quick", "home", "custom")]
+        for o in self.options:
+            o.clicked.connect(self.start)
+            opts.addWidget(o, 1)
+        root.addLayout(opts)
 
-        sub = QLabel("Select a scan type to begin")
-        sub.setObjectName("PageSubtitle")
-        root.addWidget(sub)
-        root.addSpacing(22)
-
-        # Scan type cards
-        card_row = QHBoxLayout()
-        card_row.setSpacing(12)
-        card_row.setContentsMargins(0, 0, 0, 0)
-
-        self._quick_card = _ScanOptionCard(
-            "fa5s.bolt", "Quick Scan", "Downloads, Desktop, /tmp")
-        self._full_card = _ScanOptionCard(
-            "fa5s.shield-alt", "Full Scan", "Entire filesystem")
-        self._custom_card = _ScanOptionCard(
-            "fa5s.folder-open", "Custom Scan", "Choose a folder to scan")
-
-        self._quick_card.clicked.connect(lambda: self._trigger("quick"))
-        self._full_card.clicked.connect(lambda: self._trigger("full"))
-        self._custom_card.clicked.connect(self._trigger_custom)
-
-        card_row.addWidget(self._quick_card)
-        card_row.addWidget(self._full_card)
-        card_row.addWidget(self._custom_card)
-        card_row.addStretch()
-        root.addLayout(card_row)
-        root.addSpacing(24)
-
-        # Progress section
-        self._progress_frame = QFrame()
-        self._progress_frame.setObjectName("Card")
-        self._progress_frame.setVisible(False)
-        prog_lay = QVBoxLayout(self._progress_frame)
-        prog_lay.setContentsMargins(20, 16, 20, 16)
-        prog_lay.setSpacing(12)
-
+        # Running / result panel.
+        self.panel = Card()
+        p = self.panel.body
+        p.setContentsMargins(22, 18, 22, 18)
         top = QHBoxLayout()
-        top.setSpacing(10)
-        self._scan_icon = QLabel()
-        top.addWidget(self._scan_icon)
-        self._status_lbl = QLabel("Scanning…")
-        self._status_lbl.setObjectName("Strong")
-        top.addWidget(self._status_lbl)
-        top.addStretch()
+        self.p_title = label("", "Strong")
+        self.p_chip = Chip()
+        top.addWidget(self.p_title, 1)
+        top.addWidget(self.p_chip)
+        p.addLayout(top)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setFixedHeight(6)
+        p.addWidget(self.progress)
+        self.p_text = label("", "Muted", wrap=True)
+        p.addWidget(self.p_text)
+        btns = QHBoxLayout()
+        self.b_cancel = QPushButton("Stop scan")
+        self.b_cancel.setObjectName("GhostButton")
+        self.b_cancel.clicked.connect(self._cancel)
+        self.b_review = QPushButton("Review findings")
+        self.b_review.setObjectName("PrimaryButton")
+        self.b_review.clicked.connect(self.show_findings)
+        btns.addWidget(self.b_cancel)
+        btns.addWidget(self.b_review)
+        btns.addStretch(1)
+        p.addLayout(btns)
+        self.panel.hide()
+        root.addWidget(self.panel)
 
-        self._abort_btn = QPushButton("   Stop")
-        self._abort_btn.setObjectName("DangerButton")
-        self._abort_btn.setFixedWidth(90)
-        self._abort_btn.setIconSize(QSize(13, 13))
-        self._abort_btn.clicked.connect(self._do_abort)
-        top.addWidget(self._abort_btn)
-        prog_lay.addLayout(top)
+        root.addWidget(label("SCAN HISTORY", "SectionLabel"))
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Date", "Type", "Files", "Findings", "Result"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(self.table, 1)
 
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setTextVisible(False)
-        self._progress_bar.setFixedHeight(6)
-        prog_lay.addWidget(self._progress_bar)
+        client.scan_progress.connect(self._progress)
+        client.scan_finished.connect(self._finished)
+        theme.changed.connect(lambda _p: [o.retint() for o in self.options])
 
-        meta_row = QHBoxLayout()
-        self._files_lbl = QLabel("Preparing…")
-        self._files_lbl.setObjectName("CardSub")
-        meta_row.addWidget(self._files_lbl)
-        self._threats_lbl = QLabel("Threats: 0")
-        meta_row.addWidget(self._threats_lbl)
-        meta_row.addStretch()
-        self._elapsed_lbl = QLabel("00:00")
-        self._elapsed_lbl.setObjectName("CardSub")
-        meta_row.addWidget(self._elapsed_lbl)
-        prog_lay.addLayout(meta_row)
+    # ── Actions ───────────────────────────────────────────────────────────
 
-        self._file_lbl = QLabel("")
-        self._file_lbl.setObjectName("Dim")
-        self._file_lbl.setWordWrap(True)
-        prog_lay.addWidget(self._file_lbl)
+    def start(self, kind: str):
+        if self.current:
+            QMessageBox.information(self, "Qlam", "A scan is already running.")
+            return
+        paths: list[str] = []
+        if kind == "custom":
+            folder = QFileDialog.getExistingDirectory(self, "Choose a folder to scan", os.path.expanduser("~"))
+            if not folder:
+                return
+            paths = [folder]
+        self._show_running(kind, paths)
+        self.client.start_scan(kind, paths, done=self._started, fail=self._start_failed)
 
-        root.addWidget(self._progress_frame)
-        root.addSpacing(16)
+    def _started(self, scan_id):
+        self.current = str(scan_id)
 
-        # Log
-        log_header = QHBoxLayout()
-        log_title = QLabel("SCAN LOG")
-        log_title.setObjectName("SectionLabel")
-        log_header.addWidget(log_title)
-        log_header.addStretch()
-        self._clear_btn = QPushButton("Clear")
-        self._clear_btn.setObjectName("GhostButton")
-        self._clear_btn.setFixedWidth(76)
-        self._clear_btn.setFixedHeight(30)
-        log_header.addWidget(self._clear_btn)
-        root.addLayout(log_header)
-        root.addSpacing(10)
+    def _start_failed(self, msg: str):
+        self.current = None
+        self.panel.hide()
+        self._set_options_enabled(True)
+        QMessageBox.warning(self, "Qlam", f"The scan could not start.\n\n{msg}")
 
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMinimumHeight(180)
-        self._log.setPlaceholderText("Scan output will appear here…")
-        root.addWidget(self._log)
+    def _cancel(self):
+        if self.current:
+            self.client.cancel_scan(self.current)
+            self.b_cancel.setEnabled(False)
+            self.p_text.setText("Stopping…")
 
-        self._clear_btn.clicked.connect(self._log.clear)
+    def _set_options_enabled(self, on: bool):
+        for o in self.options:
+            o.setEnabled(on)
 
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
+    def _show_running(self, kind: str, paths: list[str]):
+        self._set_options_enabled(False)
+        self.panel.show()
+        title = _KINDS.get(kind, _KINDS["custom"])[1]
+        if paths:
+            title += f": {short_path(paths[0], 50)}"
+        self.p_title.setText(title)
+        self.p_chip.setText("Scanning")
+        self.p_chip.set_level("info")
+        self.progress.show()
+        self.p_text.setText("Starting…")
+        self.b_cancel.show()
+        self.b_cancel.setEnabled(True)
+        self.b_review.hide()
 
-    def _apply_theme(self):
-        p = theme.p
-        self._abort_btn.setIcon(qta.icon("fa5s.stop-circle", color=p["bad"]))
-        self._threats_lbl.setStyleSheet(f"color: {p['bad']}; font-size: 12px;")
-        if not self._is_scanning:
-            self._scan_icon.setPixmap(
-                qta.icon("fa5s.shield-alt", color=p["text_mid"]).pixmap(QSize(18, 18)))
+    def _progress(self, scan_id: str, files: int, detections: int):
+        if scan_id != self.current:
+            return
+        self.p_text.setText(f"{files:,} files checked" + (f" · {detections} found" if detections else ""))
 
-    # ── Public API ────────────────────────────────────────────────────────
-
-    def start_scan_ui(self, scan_type: str, targets: list[str]):
-        p = theme.p
-        self._is_scanning = True
-        self._threats = 0
-        self._elapsed_secs = 0
-
-        self._progress_frame.setVisible(True)
-        self._progress_bar.setObjectName("")
-        self._progress_bar.setRange(0, 0)
-        self._scan_icon.setPixmap(
-            qta.icon("fa5s.shield-alt", color=p["text"]).pixmap(QSize(18, 18)))
-        self._status_lbl.setText(f"{scan_type.title()} scan in progress")
-        self._status_lbl.setStyleSheet("")
-        self._files_lbl.setText("Counting files…")
-        self._threats_lbl.setText("Threats: 0")
-        self._elapsed_lbl.setText("00:00")
-        self._file_lbl.setText("")
-        self._abort_btn.setEnabled(True)
-
-        self._log.append(f'<span style="color:{p["text_dim"]}">{"─" * 50}</span>')
-        self._log.append(
-            f'<span style="color:{p["text"]}; font-weight:600;">[{_now()}]</span>'
-            f'<span style="color:{p["text_mid"]};"> {scan_type.upper()} SCAN STARTED</span>')
-        self._log.append(
-            f'<span style="color:{p["text_dim"]}">Targets: {", ".join(targets)}</span>')
-        self._timer.start(1000)
-
-    def update_progress(self, current: int, total: int, filepath: str):
-        if total > 0:
-            self._progress_bar.setRange(0, total)
-        self._progress_bar.setValue(current)
-        self._files_lbl.setText(f"{current:,} / {total:,} files")
-        trunc = filepath[-80:] if len(filepath) > 80 else filepath
-        self._file_lbl.setText(trunc)
-
-    def on_file_scanned(self, path: str, infected: bool, threat: str):
-        if infected:
-            p = theme.p
-            self._threats += 1
-            self._threats_lbl.setText(f"Threats: {self._threats}")
-            self._log.append(
-                f'<span style="color:{p["bad"]}; font-weight:600;">THREAT</span>'
-                f'<span style="color:{p["text"]};"> {path}</span>'
-                f'<span style="color:{p["bad"]};"> [{threat}]</span>')
-
-    def finish_scan_ui(self, stats):
-        p = theme.p
-        self._is_scanning = False
-        self._timer.stop()
-        self._abort_btn.setEnabled(False)
-        self._progress_bar.setRange(0, max(1, stats.scanned_files))
-        self._progress_bar.setValue(stats.scanned_files)
-
-        if stats.infected_files > 0:
-            self._progress_bar.setObjectName("DangerProgress")
-            self._status_lbl.setText(f"{stats.infected_files} threat(s) found")
-            self._status_lbl.setStyleSheet(f"font-weight: 600; font-size: 14px; color: {p['bad']};")
-            self._scan_icon.setPixmap(
-                qta.icon("fa5s.exclamation-triangle", color=p["bad"]).pixmap(QSize(18, 18)))
+    def _finished(self, rec: dict):
+        if rec.get("id") != self.current:
+            self.refresh()
+            return
+        self.current = None
+        self._set_options_enabled(True)
+        self.progress.hide()
+        self.b_cancel.hide()
+        found = int(rec.get("detections", 0))
+        noted = int(rec.get("suspicious", 0))
+        files = int(rec.get("files", 0))
+        secs = max(0, int(rec.get("finished", 0)) - int(rec.get("started", 0)))
+        dur = f"{secs // 60} min {secs % 60} s" if secs >= 60 else f"{secs} s"
+        if rec.get("status") == "cancelled":
+            self.p_chip.setText("Stopped")
+            self.p_chip.set_level("info")
+            self.p_text.setText(f"Stopped after {files:,} files.")
+        elif found:
+            self.p_chip.setText(f"{found} threat{'s' if found > 1 else ''}")
+            self.p_chip.set_level("danger")
+            self.p_text.setText(f"{files:,} files checked in {dur}. Nothing was changed — "
+                                "review the findings and decide what to do.")
+        elif noted:
+            self.p_chip.setText(f"{noted} notice{'s' if noted > 1 else ''}")
+            self.p_chip.set_level("notice")
+            self.p_text.setText(f"{files:,} files checked in {dur}. No malware found; "
+                                f"{noted} item{'s' if noted > 1 else ''} worth a look.")
         else:
-            self._progress_bar.setObjectName("SuccessProgress")
-            self._status_lbl.setText("Scan complete — no threats found")
-            self._status_lbl.setStyleSheet(f"font-weight: 600; font-size: 14px; color: {p['good']};")
-            self._scan_icon.setPixmap(
-                qta.icon("fa5s.check-circle", color=p["good"]).pixmap(QSize(18, 18)))
-        self._progress_bar.style().unpolish(self._progress_bar)
-        self._progress_bar.style().polish(self._progress_bar)
+            self.p_chip.setText("Clean")
+            self.p_chip.set_level("good")
+            self.p_text.setText(f"{files:,} files checked in {dur}. No threats found.")
+        self.b_review.setVisible(bool(found or noted) and rec.get("status") != "cancelled")
+        self.refresh()
 
-        self._file_lbl.setText("")
-        self._log.append(
-            f'<span style="color:{p["text"]}; font-weight:600;">[{_now()}]</span>'
-            f'<span style="color:{p["text_mid"]};"> FINISHED  '
-            f'{stats.scanned_files:,} files · '
-            f'{stats.infected_files} threats · '
-            f'{stats.duration_seconds():.1f}s</span>')
+    # ── History ───────────────────────────────────────────────────────────
 
-    def start_with(self, scan_type: str, targets: list[str]):
-        self._trigger_type(scan_type, targets)
-
-    # ── Internal ──────────────────────────────────────────────────────────
-
-    def _trigger(self, scan_type: str):
-        if self._is_scanning:
-            return
-        from core.scan_engine import ScanEngine
-        targets = (
-            ScanEngine.quick_scan_paths() if scan_type == "quick"
-            else ScanEngine.full_scan_paths()
-        )
-        self._trigger_type(scan_type, targets)
-
-    def _trigger_custom(self):
-        if self._is_scanning:
-            return
-        path = QFileDialog.getExistingDirectory(
-            self, "Select folder to scan", str(Path.home()))
-        if path:
-            self._trigger_type("custom", [path])
-
-    def _trigger_type(self, scan_type: str, targets: list[str]):
-        self.start_scan_ui(scan_type, targets)
-        self.scan_requested.emit(scan_type, targets, True)
-
-    def _do_abort(self):
-        self._abort_btn.setEnabled(False)
-        self._status_lbl.setText("Stopping…")
-        self.abort_requested.emit()
-
-    def _tick(self):
-        self._elapsed_secs += 1
-        m, s = divmod(self._elapsed_secs, 60)
-        self._elapsed_lbl.setText(f"{m:02d}:{s:02d}")
-
-
-def _now() -> str:
-    from datetime import datetime
-    return datetime.now().strftime("%H:%M:%S")
+    def refresh(self):
+        scans = self.client.scans(50)
+        running = [s for s in scans if s.get("status") == "running"]
+        if running and not self.current:
+            # A scan started earlier (or from the tray) is still going.
+            self.current = running[0]["id"]
+            self.client.my_scans.add(self.current)
+            self._show_running(running[0].get("kind", "custom"), [])
+        rows = [s for s in scans if s.get("status") != "running"]
+        self.table.setRowCount(len(rows))
+        for r, s in enumerate(rows):
+            found = int(s.get("detections", 0))
+            noted = int(s.get("suspicious", 0))
+            result = {"cancelled": "Stopped", "failed": "Interrupted"}.get(
+                s.get("status"), "Threats found" if found else ("Notices" if noted else "Clean"))
+            vals = [when(s.get("started")), s.get("kind", "").capitalize(),
+                    f"{int(s.get('files', 0)):,}", str(found + noted), result]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if c == 4 and found:
+                    it.setForeground(QColor(theme.p["bad"]))
+                self.table.setItem(r, c, it)

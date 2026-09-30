@@ -1,0 +1,39 @@
+[Unit]
+Description=Qlam signature feed update
+Documentation=https://github.com/berk-kucuk/QLAM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/qlam/qlamd update
+# Parses data straight off the internet: unprivileged and sandboxed. It can
+# only write to the feeds directory; qlamd picks up the result by itself.
+User=qlam
+Group=qlam
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/qlam/feeds
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# yara-x compiles rules to native code at runtime (wasmtime), which needs
+# writable+executable memory, so MemoryDenyWriteExecute can't be set.
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+Nice=10
+IOSchedulingClass=idle

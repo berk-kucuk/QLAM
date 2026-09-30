@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Qlam</vendor>
+  <vendor_url>https://github.com/berk-kucuk/QLAM</vendor_url>
+  <icon_name>qlam</icon_name>
+
+  <action id="org.maze.qlam.scan">
+    <description>Scan your files for malware</description>
+    <description xml:lang="tr">Dosyalarınızı zararlı yazılıma karşı tarayın</description>
+    <message>Authentication is required to scan files</message>
+    <message xml:lang="tr">Dosyaları taramak için kimlik doğrulaması gerekiyor</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.maze.qlam.scan-any">
+    <description>Scan files in other users' home folders</description>
+    <description xml:lang="tr">Diğer kullanıcıların ev klasörlerini tarayın</description>
+    <message>Authentication is required to scan another user's files</message>
+    <message xml:lang="tr">Başka bir kullanıcının dosyalarını taramak için kimlik doğrulaması gerekiyor</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.maze.qlam.quarantine">
+    <description>Move your files to quarantine or delete quarantined files</description>
+    <description xml:lang="tr">Dosyalarınızı karantinaya alın veya karantinadaki dosyaları silin</description>
+    <message>Authentication is required to manage quarantine</message>
+    <message xml:lang="tr">Karantinayı yönetmek için kimlik doğrulaması gerekiyor</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.maze.qlam.restore">
+    <description>Restore a file from quarantine</description>
+    <description xml:lang="tr">Karantinadaki bir dosyayı geri yükleyin</description>
+    <message>Restoring a quarantined file can put malware back on your system. Authenticate to continue.</message>
+    <message xml:lang="tr">Karantinadaki bir dosyayı geri yüklemek zararlı yazılımı sisteme geri getirebilir. Devam etmek için kimlik doğrulayın.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.maze.qlam.trust">
+    <description>Mark a file as trusted</description>
+    <description xml:lang="tr">Bir dosyayı güvenilir olarak işaretleyin</description>
+    <message>Trusted files are never reported again. Authenticate to continue.</message>
+    <message xml:lang="tr">Güvenilir dosyalar bir daha bildirilmez. Devam etmek için kimlik doğrulayın.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.maze.qlam.update">
+    <description>Update malware signatures</description>
+    <description xml:lang="tr">Zararlı yazılım imzalarını güncelleyin</description>
+    <message>Authentication is required to update signatures</message>
+    <message xml:lang="tr">İmzaları güncellemek için kimlik doğrulaması gerekiyor</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.maze.qlam.configure">
+    <description>Change Qlam protection settings</description>
+    <description xml:lang="tr">Qlam koruma ayarlarını değiştirin</description>
+    <message>Authentication is required to change protection settings</message>
+    <message xml:lang="tr">Koruma ayarlarını değiştirmek için kimlik doğrulaması gerekiyor</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

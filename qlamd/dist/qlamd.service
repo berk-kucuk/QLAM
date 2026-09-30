@@ -1,0 +1,42 @@
+[Unit]
+Description=Qlam antivirus daemon
+Documentation=https://github.com/berk-kucuk/QLAM
+After=local-fs.target dbus.service
+Wants=qlam-update.timer
+
+[Service]
+Type=dbus
+BusName=org.maze.Qlam1
+ExecStart=/usr/lib/qlam/qlamd daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+
+# Root is needed for fanotify permission events and to read/quarantine
+# files in every user's home, but not much else.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN
+NoNewPrivileges=yes
+ProtectSystem=strict
+# "-": skip locations that do not exist on this machine.
+ReadWritePaths=/var/lib/qlam -/home -/root /tmp /var/tmp /dev/shm -/run/user -/run/media -/media -/mnt
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+# Keep the daemon from being the thing the OOM killer spares while the
+# desktop dies, but don't let a big scan be its first victim either.
+OOMScoreAdjust=-100
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+# Qlam daemon configuration. Every key is optional; shown values are the
+# defaults. Settings changed from the Qlam app are stored separately and
+# take precedence over this file.
+
+# On-access protection: scan files when they are written or executed.
+realtime = true
+
+# Block execution of confirmed detections only: files whose SHA-256 exactly
+# matches a known malware sample. Pattern matches are never blocked.
+block_exec = true
+
+# Also move confirmed detections to quarantine without asking. Off by default:
+# Qlam warns and you decide.
+auto_quarantine = false
+
+# Files larger than this are not scanned on access.
+max_file_size_mb = 100
+
+# Locations users can write to. Qlam only watches these.
+scope = ["/home", "/root", "/tmp", "/var/tmp", "/dev/shm", "/run/user", "/run/media", "/media", "/mnt"]
+
+# Path prefixes never scanned on access.
+exclude = ["/var/lib/qlam"]
+
+# ClamAV is an optional extra engine (uses ~1 GB RAM). Used when
+# clamav-daemon is running.
+clamd_socket = "/run/clamav/clamd.ctl"
+
+exec_workers = 4
+background_workers = 2

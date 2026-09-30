@@ -1,0 +1,11 @@
+# Qlam known-good list: hashes of legitimate files that malware feeds list
+# by mistake (usually a library captured alongside a bot by a honeypot).
+# Files listed here are never flagged by any engine. Every entry must name
+# the verified origin of the file.
+#
+# sha256                                                             # origin
+
+# cryptography 50.0.0, _rust.abi3.so from the official PyPI wheel
+# cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl
+# (listed by MalwareBazaar as Mirai, abuse_ch honeypot, 2026-08-24)
+613ec570594be2691ce18fe8aa51aa4716584c0e586ec97dd790c4b9757b5a83

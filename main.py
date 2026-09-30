@@ -1,60 +1,77 @@
 #!/usr/bin/env python3
-import sys
+"""Qlam — desktop client for the qlamd antivirus service.
+
+    qlam            open the window
+    qlam --tray     start in the tray (used at login) to show warnings
+    qlam --session  talk to a development qlamd on the session bus
+"""
 import os
+import sys
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, pyqtClassInfo, pyqtSlot
+from PyQt6.QtDBus import QDBusConnection, QDBusInterface
 from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtWidgets import QApplication
 
-from ui.main_window import MainWindow
-from ui.theme import theme, get_stylesheet
+from ui.theme import get_stylesheet, theme
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent
 LOGOS_DIR = BASE_DIR / "Logos"
 RESOURCES_DIR = BASE_DIR / "resources"
 
+_GUI_SERVICE = "org.maze.QlamGui"
+
+
+@pyqtClassInfo("D-Bus Interface", _GUI_SERVICE)
+class _Instance(QObject):
+    """Lets a second `qlam` launch bring up the running one instead of
+    starting another tray icon."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+
+    @pyqtSlot()
+    def Show(self):
+        self._window.show_window()
+
 
 def main():
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-    # Force the X11 WM_CLASS instance name (res_name) to "qlam". Without
-    # this Qt derives it from argv[0] ("main.py"), so the dock/taskbar
-    # can't match the window to qlam.desktop and shows a second, generic
-    # icon. Must be set before QApplication is constructed.
     os.environ.setdefault("RESOURCE_NAME", "qlam")
-
     tray_only = "--tray" in sys.argv
+    session_bus = "--session" in sys.argv
 
     app = QApplication(sys.argv)
     app.setApplicationName("Qlam")
-    app.setApplicationDisplayName("Qlam Antivirus")
+    app.setApplicationDisplayName("Qlam")
     app.setOrganizationName("Qlam")
-    # Ties the window to qlam.desktop so the dock/taskbar uses our own
-    # icon instead of showing a second, generic one (Wayland app_id /
-    # X11 WM_CLASS). Must match the .desktop basename and StartupWMClass.
     app.setDesktopFileName("qlam")
     app.setQuitOnLastWindowClosed(False)
 
-    logo_path = LOGOS_DIR / "qlam.png"
-    if logo_path.exists():
-        app.setWindowIcon(QIcon(str(logo_path)))
+    bus = QDBusConnection.sessionBus()
+    if not bus.registerService(_GUI_SERVICE):
+        if not tray_only:
+            QDBusInterface(_GUI_SERVICE, "/", _GUI_SERVICE, bus).call("Show")
+        return 0
 
+    logo = LOGOS_DIR / "qlam.png"
+    if logo.exists():
+        app.setWindowIcon(QIcon(str(logo)))
     font = QFont("Inter", 10)
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
-
-    # Apply the current theme and re-apply on every toggle.
     app.setStyleSheet(get_stylesheet(theme.name, RESOURCES_DIR))
-    theme.changed.connect(
-        lambda _p: app.setStyleSheet(get_stylesheet(theme.name, RESOURCES_DIR))
-    )
+    theme.changed.connect(lambda _p: app.setStyleSheet(get_stylesheet(theme.name, RESOURCES_DIR)))
 
-    window = MainWindow()
-    if not tray_only:
+    from ui.main_window import MainWindow
+    window = MainWindow(session_bus=session_bus)
+    instance = _Instance(window)
+    bus.registerObject("/", instance, QDBusConnection.RegisterOption.ExportAllSlots)
+    if not tray_only or window.tray is None:
         window.show()
-
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

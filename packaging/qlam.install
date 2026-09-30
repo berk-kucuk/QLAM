@@ -1,0 +1,37 @@
+_enable_hint() {
+    cat <<'MSG'
+==> Qlam: turn protection on with
+      sudo systemctl enable --now qlamd.service qlam-update.timer
+    and fetch the malware signatures once (a few minutes, ~250 MB download
+    the first time):
+      sudo systemctl start qlam-update.service
+MSG
+}
+
+post_install() {
+    _enable_hint
+}
+
+post_upgrade() {
+    if [ "$(vercmp "$2" 2.0.0)" -lt 0 ]; then
+        cat <<'MSG'
+==> Qlam 2 replaces the old in-app scanner with the qlamd system service.
+    Scan history and quarantine from Qlam 1.x are not migrated; old
+    quarantined files stay in ~/.local/share/Qlam/quarantine.
+MSG
+        _enable_hint
+    fi
+    # Pick up the new binary and rules.
+    systemctl try-restart qlamd.service >/dev/null 2>&1 || true
+}
+
+pre_remove() {
+    systemctl disable --now qlamd.service qlam-update.timer >/dev/null 2>&1 || true
+}
+
+post_remove() {
+    cat <<'MSG'
+==> Qlam's state (quarantine, history, signatures) is kept in /var/lib/qlam.
+    Remove it by hand if you no longer need it.
+MSG
+}

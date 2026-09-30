@@ -421,6 +421,61 @@ QGroupBox {{
 }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px; background-color: {surface}; }}
 
+/* ── Status hero (overview) ────────────────────────────── */
+#Hero {{
+    background-color: {surface};
+    border: 1px solid {border};
+    border-radius: 14px;
+}}
+#Hero[state="ok"]        {{ background-color: {good_soft}; border-color: {good_border}; }}
+#Hero[state="attention"] {{ background-color: {bad_soft};  border-color: {bad_border}; }}
+#Hero[state="notice"]    {{ background-color: {surface};   border-color: {border2}; }}
+#HeroTitle {{ font-size: 20px; font-weight: 700; color: {text}; letter-spacing: -0.2px; }}
+#HeroText  {{ font-size: 13px; color: {text_mid}; }}
+
+/* ── Chips / badges ────────────────────────────────────── */
+#Chip {{
+    border-radius: 9px;
+    padding: 2px 9px;
+    font-size: 11px;
+    font-weight: 600;
+    background-color: {elevated};
+    color: {text_mid};
+}}
+#Chip[level="danger"] {{ background-color: {bad_soft};  color: {bad};  border: 1px solid {bad_border}; }}
+#Chip[level="warn"]   {{ background-color: {bad_soft};  color: {warn}; border: 1px solid {bad_border}; }}
+#Chip[level="notice"] {{ background-color: {elevated};  color: {text_mid}; border: 1px solid {border2}; }}
+#Chip[level="good"]   {{ background-color: {good_soft}; color: {good}; border: 1px solid {good_border}; }}
+#Chip[level="info"]   {{ background-color: {elevated};  color: {text_mid}; border: 1px solid {border}; }}
+#NavBadge {{
+    background-color: {bad};
+    color: #ffffff;
+    border-radius: 9px;
+    padding: 0 6px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+#StatValue {{ color: {text}; font-size: 22px; font-weight: 700; }}
+#StatLabel {{ color: {text_dim}; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }}
+#DetailTitle {{ color: {text}; font-size: 17px; font-weight: 700; }}
+#Mono {{
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    font-size: 12px;
+    color: {text_mid};
+}}
+
+/* ── Finding / activity lists ──────────────────────────── */
+QListWidget {{
+    background-color: {surface};
+    border: 1px solid {border};
+    border-radius: 12px;
+    padding: 4px;
+}}
+QListWidget::item {{ border-radius: 8px; margin: 1px 2px; }}
+QListWidget::item:hover {{ background-color: {surface_alt}; }}
+QListWidget::item:selected {{ background-color: {elevated}; }}
+#EmptyState {{ color: {text_dim}; font-size: 13px; }}
+
 /* ── Tooltip / dialogs / separators ────────────────────── */
 QToolTip {{
     background-color: {tooltip};
@@ -468,21 +523,35 @@ class ThemeManager(QObject):
         self.set("light" if self.name == "dark" else "dark")
 
 
-def load_theme() -> str:
+def load_prefs() -> dict:
     try:
         with open(_CFG_FILE) as f:
-            return json.load(f).get("theme", "dark")
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return "dark"
+        return {}
+
+
+def save_pref(key: str, value) -> None:
+    """Merge one UI preference into ui.json."""
+    data = load_prefs()
+    data[key] = value
+    try:
+        _CFG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CFG_FILE.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1)
+        tmp.replace(_CFG_FILE)
+    except Exception:
+        pass
+
+
+def load_theme() -> str:
+    return load_prefs().get("theme", "dark")
 
 
 def save_theme(name: str) -> None:
-    try:
-        _CFG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(_CFG_FILE, "w") as f:
-            json.dump({"theme": name}, f)
-    except Exception:
-        pass
+    save_pref("theme", name)
 
 
 # Global singleton used across the UI.

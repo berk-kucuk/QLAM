@@ -1,191 +1,133 @@
-import qtawesome as qta
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTableWidget, QTableWidgetItem,
-    QHeaderView, QMessageBox, QAbstractItemView,
-)
-from PyQt6.QtGui import QColor
+"""Quarantine: files Qlam moved aside. Stored encoded, so they can't run."""
+from __future__ import annotations
 
-from core.quarantine_manager import QuarantineManager, QuarantinedFile
-from ui.theme import theme
+import os
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QMessageBox, QPushButton,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+)
+
+from ui.widgets import label, page_header, short_path, size, when
 
 
 class QuarantinePage(QWidget):
-    def __init__(self, quarantine_manager: QuarantineManager, parent=None):
+    changed = pyqtSignal()
+
+    def __init__(self, client, parent=None):
         super().__init__(parent)
-        self._qm = quarantine_manager
-        self._build_ui()
-        theme.changed.connect(lambda _p: self._apply_theme())
-        self._apply_theme()
+        self.client = client
+        self._items: list[dict] = []
 
-    def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 24, 32, 32)
-        root.setSpacing(0)
+        root.setContentsMargins(36, 30, 36, 30)
+        root.setSpacing(18)
+        root.addWidget(page_header(
+            "Quarantine",
+            "Files moved here are stored encoded and cannot run. Restore one if it was a false alarm."))
 
-        title = QLabel("Quarantine")
-        title.setObjectName("PageTitle")
-        root.addWidget(title)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["File", "Detection", "Quarantined", "Size"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        hh = self.table.horizontalHeader()
+        hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2, 3):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.itemSelectionChanged.connect(self._sel_changed)
+        root.addWidget(self.table, 1)
+        self.empty = label("Quarantine is empty.", "EmptyState")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.empty, 1)
 
-        sub = QLabel("Files that have been isolated due to detected threats")
-        sub.setObjectName("PageSubtitle")
-        root.addWidget(sub)
-        root.addSpacing(20)
-
-        # Toolbar
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
-
-        self._restore_btn = QPushButton("   Restore Selected")
-        self._restore_btn.setObjectName("WarnButton")
-        self._restore_btn.setIconSize(QSize(13, 13))
-        self._restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._restore_btn.clicked.connect(self._restore_selected)
-        toolbar.addWidget(self._restore_btn)
-
-        self._delete_btn = QPushButton("   Delete Selected")
-        self._delete_btn.setObjectName("DangerButton")
-        self._delete_btn.setIconSize(QSize(13, 13))
-        self._delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._delete_btn.clicked.connect(self._delete_selected)
-        toolbar.addWidget(self._delete_btn)
-
-        self._delete_all_btn = QPushButton("   Delete All")
-        self._delete_all_btn.setObjectName("DangerButton")
-        self._delete_all_btn.setIconSize(QSize(13, 13))
-        self._delete_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._delete_all_btn.clicked.connect(self._delete_all)
-        toolbar.addWidget(self._delete_all_btn)
-
-        toolbar.addStretch()
-
-        self._count_label = QLabel("0 files in quarantine")
-        self._count_label.setObjectName("Muted")
-        toolbar.addWidget(self._count_label)
-
-        root.addLayout(toolbar)
-        root.addSpacing(14)
-
-        # Table
-        self._table = QTableWidget()
-        self._table.setColumnCount(5)
-        self._table.setHorizontalHeaderLabels(
-            ["Filename", "Original Path", "Threat", "Date Quarantined", "Size"]
-        )
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setAlternatingRowColors(True)
-        self._table.verticalHeader().setVisible(False)
-        root.addWidget(self._table)
-
-        self.refresh()
-
-    def _apply_theme(self):
-        p = theme.p
-        self._restore_btn.setIcon(qta.icon("fa5s.undo-alt", color=p["warn"]))
-        self._delete_btn.setIcon(qta.icon("fa5s.trash", color=p["bad"]))
-        self._delete_all_btn.setIcon(qta.icon("fa5s.trash-alt", color=p["bad"]))
-        self.refresh()
+        btns = QHBoxLayout()
+        self.b_restore = QPushButton("Restore…")
+        self.b_restore.setObjectName("GhostButton")
+        self.b_restore.clicked.connect(self._restore)
+        self.b_delete = QPushButton("Delete permanently")
+        self.b_delete.setObjectName("DangerButton")
+        self.b_delete.clicked.connect(self._delete)
+        btns.addWidget(self.b_restore)
+        btns.addStretch(1)
+        btns.addWidget(self.b_delete)
+        root.addLayout(btns)
+        self._sel_changed()
 
     def refresh(self):
-        files = self._qm.list_files()
-        self._table.setRowCount(len(files))
-        for row, qf in enumerate(files):
-            self._table.setItem(row, 0, _item(qf.filename))
-            self._table.setItem(row, 1, _item(qf.original_path))
-            self._table.setItem(row, 2, _item(qf.threat, theme.p["bad"]))
-            self._table.setItem(row, 3, _item(qf.timestamp[:19].replace("T", " ")))
-            self._table.setItem(row, 4, _item(self._file_size(qf.quarantine_path)))
-            # Store ID in hidden data
-            self._table.item(row, 0).setData(Qt.ItemDataRole.UserRole, qf.id)
+        self._items = self.client.quarantine()
+        self.table.setRowCount(len(self._items))
+        for r, q in enumerate(self._items):
+            vals = [short_path(q.get("original_path", ""), 90), q.get("detection", ""),
+                    when(q.get("ts")), size(int(q.get("size", 0)))]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if c == 0:
+                    it.setToolTip(q.get("original_path", ""))
+                self.table.setItem(r, c, it)
+        has = bool(self._items)
+        self.table.setVisible(has)
+        self.empty.setVisible(not has)
+        self.b_restore.setVisible(has)
+        self.b_delete.setVisible(has)
+        self._sel_changed()
 
-        n = len(files)
-        self._count_label.setText(f"{n} file{'s' if n != 1 else ''} in quarantine")
-        self._restore_btn.setEnabled(n > 0)
-        self._delete_btn.setEnabled(n > 0)
-        self._delete_all_btn.setEnabled(n > 0)
+    def _selected(self) -> dict | None:
+        rows = self.table.selectionModel().selectedRows()
+        return self._items[rows[0].row()] if rows else None
 
-    # ── Actions ───────────────────────────────────────────────────────────
+    def _sel_changed(self):
+        on = self._selected() is not None
+        self.b_restore.setEnabled(on)
+        self.b_delete.setEnabled(on)
 
-    def _selected_ids(self) -> list[str]:
-        rows = set(idx.row() for idx in self._table.selectedIndexes())
-        ids = []
-        for row in rows:
-            item = self._table.item(row, 0)
-            if item:
-                ids.append(item.data(Qt.ItemDataRole.UserRole))
-        return ids
-
-    def _restore_selected(self):
-        ids = self._selected_ids()
-        if not ids:
-            QMessageBox.information(self, "No selection", "Select files to restore.")
+    def _restore(self):
+        q = self._selected()
+        if not q:
             return
-        reply = QMessageBox.question(
-            self, "Restore",
-            f"Restore {len(ids)} file(s)? They will return to their original location.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        ans = QMessageBox.warning(
+            self, "Restore this file?",
+            f"{q.get('detection')}\n\nRestoring puts this file back where it can run. Only restore it "
+            "if you are sure it was a false alarm — Qlam will then trust it and not report it again.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if ans != QMessageBox.StandardButton.Yes:
             return
-        for qid in ids:
-            self._qm.restore_file(qid)
+        dest = q.get("original_path", "")
+        if not dest or os.path.lexists(dest) or not os.access(os.path.dirname(dest) or "/", os.W_OK):
+            start = dest if dest and os.path.isdir(os.path.dirname(dest)) else os.path.expanduser("~")
+            dest, _ = QFileDialog.getSaveFileName(self, "Restore to", start)
+            if not dest:
+                return
+        self.b_restore.setEnabled(False)
+        self.client.restore_quarantine(
+            q["id"], dest,
+            done=lambda _r: self._done(f"Restored to {short_path(dest, 80)}."),
+            fail=self._failed)
+
+    def _delete(self):
+        q = self._selected()
+        if not q:
+            return
+        ans = QMessageBox.question(
+            self, "Delete permanently?",
+            f"{short_path(q.get('original_path', ''), 90)}\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.client.delete_quarantine(q["id"], done=lambda _r: self._done(None), fail=self._failed)
+
+    def _done(self, msg):
         self.refresh()
+        self.changed.emit()
+        if msg:
+            QMessageBox.information(self, "Qlam", msg)
 
-    def _delete_selected(self):
-        ids = self._selected_ids()
-        if not ids:
-            QMessageBox.information(self, "No selection", "Select files to delete.")
-            return
-        reply = QMessageBox.question(
-            self, "Delete",
-            f"Permanently delete {len(ids)} file(s)? This cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        for qid in ids:
-            self._qm.delete_file(qid)
+    def _failed(self, msg: str):
         self.refresh()
-
-    def _delete_all(self):
-        n = self._qm.count()
-        if n == 0:
-            return
-        reply = QMessageBox.question(
-            self, "Delete All",
-            f"Permanently delete all {n} quarantined file(s)? This cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        self._qm.delete_all()
-        self.refresh()
-
-    @staticmethod
-    def _file_size(path: str) -> str:
-        try:
-            import os
-            size = os.path.getsize(path)
-            if size < 1024:
-                return f"{size} B"
-            elif size < 1024 ** 2:
-                return f"{size / 1024:.1f} KB"
-            else:
-                return f"{size / 1024 ** 2:.1f} MB"
-        except Exception:
-            return "—"
-
-
-def _item(text: str, color: str = "") -> QTableWidgetItem:
-    item = QTableWidgetItem(text)
-    if color:
-        from PyQt6.QtGui import QColor
-        item.setForeground(QColor(color))
-    return item
+        QMessageBox.warning(self, "Qlam", msg)

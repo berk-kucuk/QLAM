@@ -11,3 +11,6 @@ data/
 # Packaged build artifacts
 dist-pkg/
 *.pkg.tar.*
+
+# Rust build output
+qlamd/target/

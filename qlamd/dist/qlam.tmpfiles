@@ -1,0 +1,3 @@
+d /var/lib/qlam             0755 root root -
+d /var/lib/qlam/quarantine  0700 root root -
+d /var/lib/qlam/feeds       0755 qlam qlam -

@@ -69,6 +69,7 @@ if command -v rsync >/dev/null 2>&1; then
     --exclude='/build' \
     --exclude='venv/' \
     --exclude='__pycache__/' \
+    --exclude='/qlamd/target' \
     --exclude='*.pyc' \
     --exclude='*.egg-info/' \
     --exclude='/screenshots' \
