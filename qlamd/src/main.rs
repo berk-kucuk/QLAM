@@ -52,6 +52,7 @@ fn run_daemon(session: bool) -> i32 {
         return 1;
     }
     supervise::install_panic_hook();
+    raise_nofile_limit();
     // Block the termination signals in every thread (threads inherit the
     // mask), so the main thread can wait for them with sigwait.
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -114,6 +115,29 @@ fn run_daemon(session: bool) -> i32 {
     log::info!("shutting down");
     d.stop();
     0
+}
+
+/// Raise the soft open-file limit to the hard limit.
+///
+/// Every fanotify event arrives as an open descriptor in this process, and
+/// the systemd default soft limit is 1024. A burst of file activity (a
+/// browser starting, an archive being unpacked) must not exhaust it: when
+/// the kernel cannot create an event's descriptor it denies that exec.
+/// qlamd.service also sets LimitNOFILE; this covers setups that override it.
+fn raise_nofile_limit() {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        if lim.rlim_cur < lim.rlim_max {
+            let want = libc::rlimit { rlim_cur: lim.rlim_max, rlim_max: lim.rlim_max };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+                lim = want;
+            }
+        }
+    }
+    log::info!("open file limit: {}", lim.rlim_cur);
 }
 
 /// Scan paths and print findings. Never quarantines or blocks anything.

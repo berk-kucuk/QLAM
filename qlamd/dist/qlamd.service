@@ -11,6 +11,9 @@ ExecStart=/usr/lib/qlam/qlamd daemon
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=2
+# Every fanotify event is delivered as an open descriptor; the default soft
+# limit of 1024 ran out during a burst of file activity (2026-09-30).
+LimitNOFILE=524288
 
 # Root is needed for fanotify permission events and to read/quarantine
 # files in every user's home, but not much else.
