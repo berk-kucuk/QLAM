@@ -22,7 +22,8 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -33,6 +34,7 @@ use crate::config::{Config, Scope};
 use crate::engine::{Severity, Verdict};
 use crate::fsutil;
 use crate::guard::{Guard, Trigger};
+use crate::supervise::{fatal, spawn_critical};
 
 /// Filesystems never marked: pseudo filesystems, and FUSE (root usually
 /// can't read other users' FUSE mounts, and blocking exec on a FUSE mount
@@ -202,6 +204,9 @@ impl Shared {
 
 pub struct Realtime {
     stop: OwnedFd,
+    /// Set before an orderly stop, so the exec-path threads ending is not
+    /// mistaken for a failure.
+    stopping: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
     pub stats: Arc<Stats>,
 }
@@ -241,11 +246,14 @@ impl Realtime {
 
         let (exec_tx, exec_rx) = unbounded::<Job>();
         let (bg_tx, bg_rx) = bounded::<Job>(4096);
+        let stopping = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
 
+        // The reader, the exec workers and the watchdog are the exec path:
+        // spawn_critical ends the process if one of them dies.
         for i in 0..cfg.exec_workers {
             let (s, rx) = (shared.clone(), exec_rx.clone());
-            threads.push(spawn(&format!("exec-{i}"), move || exec_worker(s, rx)));
+            threads.push(spawn_critical(&format!("exec-{i}"), stopping.clone(), move || exec_worker(s, rx)));
         }
         for i in 0..cfg.background_workers {
             let (s, rx) = (shared.clone(), bg_rx.clone());
@@ -255,7 +263,9 @@ impl Realtime {
             let s = shared.clone();
             let stop_fd = stop.as_raw_fd();
             let scope = scope.clone();
-            threads.push(spawn("fan-reader", move || reader(s, scope, stop_fd, exec_tx, bg_tx)));
+            threads.push(spawn_critical("fan-reader", stopping.clone(), move || {
+                reader(s, scope, stop_fd, exec_tx, bg_tx)
+            }));
         }
         {
             let s = shared.clone();
@@ -265,13 +275,14 @@ impl Realtime {
         {
             let s = shared.clone();
             let stop_fd = stop.as_raw_fd();
-            threads.push(spawn("exec-watchdog", move || watchdog(s, stop_fd)));
+            threads.push(spawn_critical("exec-watchdog", stopping.clone(), move || watchdog(s, stop_fd)));
         }
         log::info!("real-time protection on (blocking confirmed detections: {})", cfg.block_exec);
-        Ok(Realtime { stop, threads, stats })
+        Ok(Realtime { stop, stopping, threads, stats })
     }
 
     pub fn stop(self) {
+        self.stopping.store(true, Ordering::SeqCst);
         let one: u64 = 1;
         unsafe { libc::write(self.stop.as_raw_fd(), (&one as *const u64).cast(), 8) };
         for t in self.threads {
@@ -295,11 +306,71 @@ fn eventfd() -> io::Result<OwnedFd> {
 
 // ── Reader ───────────────────────────────────────────────────────────────
 
+/// How the reader reacts to a failed poll() or read() on the fanotify fd.
+#[derive(Debug, PartialEq, Eq)]
+enum OnError {
+    /// Try again at once.
+    Retry,
+    /// Out of a resource the workers will give back: pause briefly first.
+    Backoff,
+    /// A bug (bad descriptor, bad buffer): the reader cannot continue.
+    Fatal,
+}
+
+fn classify(e: &io::Error) -> OnError {
+    match e.raw_os_error() {
+        // Out of descriptors or memory. The kernel could not create the
+        // event's descriptor, answered that one event itself (a permission
+        // event is denied, a notification dropped) and kept the rest queued.
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS) => OnError::Backoff,
+        Some(libc::EBADF | libc::EFAULT | libc::EINVAL) => OnError::Fatal,
+        // Everything else is about one event, and that event is gone: read()
+        // also reports why the kernel could not open the event's file (EIO on
+        // a failing disk, EACCES, ENXIO, ...). Never a reason to stop reading.
+        _ => OnError::Retry,
+    }
+}
+
+/// Pause after a resource error: long enough for workers to close
+/// descriptors, short enough that queued execs barely notice.
+const BACKOFF: Duration = Duration::from_millis(50);
+
+/// Logs at most once per interval, counting what it held back.
+struct Throttle {
+    every: Duration,
+    last: Option<Instant>,
+    suppressed: u64,
+}
+
+impl Throttle {
+    fn new(every: Duration) -> Throttle {
+        Throttle { every, last: None, suppressed: 0 }
+    }
+
+    fn warn(&mut self, msg: impl Display) {
+        if self.last.is_some_and(|t| t.elapsed() < self.every) {
+            self.suppressed += 1;
+            return;
+        }
+        if self.suppressed > 0 {
+            log::warn!("{msg} ({} similar messages suppressed)", self.suppressed);
+        } else {
+            log::warn!("{msg}");
+        }
+        self.last = Some(Instant::now());
+        self.suppressed = 0;
+    }
+}
+
+/// The only thread reading the fanotify descriptor, so it must never stop
+/// while protection is on: every error is retried, except the few that mean
+/// the loop itself is broken, which end the process (see supervise.rs).
 fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg_tx: Sender<Job>) {
     let me = std::process::id() as i32;
     let meta_len = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut buf = vec![0u8; 256 * 1024];
     let mut recent: HashMap<PathBuf, Instant> = HashMap::new();
+    let mut throttle = Throttle::new(Duration::from_secs(10));
 
     loop {
         let mut fds = [
@@ -308,11 +379,16 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
         ];
         let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
         if r < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
+            let e = io::Error::last_os_error();
+            match classify(&e) {
+                OnError::Retry if e.kind() == io::ErrorKind::Interrupted => {}
+                OnError::Fatal => fatal(&format!("fanotify poll: {e}")),
+                _ => {
+                    throttle.warn(format_args!("fanotify poll: {e}; retrying"));
+                    std::thread::sleep(BACKOFF);
+                }
             }
-            log::error!("fanotify poll: {}", io::Error::last_os_error());
-            return;
+            continue;
         }
         if fds[1].revents != 0 {
             return;
@@ -320,11 +396,19 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
         let n = unsafe { libc::read(s.fan.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
         if n < 0 {
             let e = io::Error::last_os_error();
-            if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) {
-                continue;
+            match classify(&e) {
+                OnError::Retry => {
+                    if !matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) {
+                        throttle.warn(format_args!("fanotify read: {e}; event skipped"));
+                    }
+                }
+                OnError::Backoff => {
+                    throttle.warn(format_args!("fanotify read: {e}; pausing {BACKOFF:?}"));
+                    std::thread::sleep(BACKOFF);
+                }
+                OnError::Fatal => fatal(&format!("fanotify read: {e}")),
             }
-            log::error!("fanotify read: {e}");
-            return;
+            continue;
         }
 
         let mut off = 0usize;
@@ -336,8 +420,7 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
             }
             off += m.event_len as usize;
             if m.vers != libc::FANOTIFY_METADATA_VERSION {
-                log::error!("fanotify metadata version {} unsupported", m.vers);
-                return;
+                fatal(&format!("fanotify metadata version {} unsupported", m.vers));
             }
             if m.fd == libc::FAN_NOFD {
                 if m.mask & libc::FAN_Q_OVERFLOW != 0 {
@@ -537,7 +620,15 @@ fn mark(fan: BorrowedFd<'_>, path: &Path, mask: u64) -> io::Result<&'static str>
 /// Mark filesystems mounted later: USB sticks under /run/media, and the
 /// /run/user/UID tmpfs created at each login.
 fn mount_watcher(s: Arc<Shared>, scope: Scope, mask: u64, mut marked: HashSet<PathBuf>, stop_fd: RawFd) {
-    let Ok(f) = std::fs::File::open("/proc/self/mountinfo") else { return };
+    // Not on the exec path: if this stops, filesystems mounted later just go
+    // unwatched. Say so instead of stopping silently.
+    let f = match std::fs::File::open("/proc/self/mountinfo") {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("mount watcher: {e}; filesystems mounted from now on will not be watched");
+            return;
+        }
+    };
     loop {
         let mut fds = [
             libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLPRI, revents: 0 },
@@ -545,9 +636,11 @@ fn mount_watcher(s: Arc<Shared>, scope: Scope, mask: u64, mut marked: HashSet<Pa
         ];
         let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
         if r < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
+            log::error!("mount watcher: {e}; filesystems mounted from now on will not be watched");
             return;
         }
         if fds[1].revents != 0 {
@@ -570,6 +663,21 @@ fn mount_watcher(s: Arc<Shared>, scope: Scope, mask: u64, mut marked: HashSet<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_errors_never_stop_the_reader_by_accident() {
+        let e = |n| io::Error::from_raw_os_error(n);
+        for n in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS] {
+            assert_eq!(classify(&e(n)), OnError::Backoff, "errno {n}");
+        }
+        // Per-event errors, including the open errors read() passes on.
+        for n in [libc::EINTR, libc::EAGAIN, libc::EIO, libc::EACCES, libc::EPERM, libc::ENOENT, libc::ENXIO] {
+            assert_eq!(classify(&e(n)), OnError::Retry, "errno {n}");
+        }
+        for n in [libc::EBADF, libc::EFAULT, libc::EINVAL] {
+            assert_eq!(classify(&e(n)), OnError::Fatal, "errno {n}");
+        }
+    }
 
     #[test]
     fn unescapes_mountinfo() {

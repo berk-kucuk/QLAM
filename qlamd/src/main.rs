@@ -20,6 +20,7 @@ mod quarantine;
 mod realtime;
 mod scanner;
 mod store;
+mod supervise;
 mod updater;
 
 use std::os::fd::AsFd;
@@ -50,6 +51,7 @@ fn run_daemon(session: bool) -> i32 {
         log::error!("qlamd must run as root (fanotify and the quarantine need it)");
         return 1;
     }
+    supervise::install_panic_hook();
     // Block the termination signals in every thread (threads inherit the
     // mask), so the main thread can wait for them with sigwait.
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
