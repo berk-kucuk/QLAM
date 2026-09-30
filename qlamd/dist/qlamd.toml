@@ -5,9 +5,11 @@
 # On-access protection: scan files when they are written or executed.
 realtime = true
 
-# Block execution of confirmed detections only: files whose SHA-256 exactly
-# matches a known malware sample. Pattern matches are never blocked.
-block_exec = true
+# Also stop confirmed detections (files whose SHA-256 exactly matches a known
+# malware sample) from running. Off by default: blocking makes every program
+# start on the watched disks wait for Qlam's answer. When off, executed files
+# are still scanned and you are warned; nothing waits for Qlam.
+block_exec = false
 
 # Also move confirmed detections to quarantine without asking. Off by default:
 # Qlam warns and you decide.

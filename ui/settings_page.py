@@ -57,9 +57,10 @@ class SettingsPage(QWidget):
         prot.body.addWidget(label("PROTECTION", "SectionLabel"))
         self.t_rt = _Toggle("Real-time protection",
                             "Check files as they are downloaded or created, and before they run.")
-        self.t_block = _Toggle("Stop known malware from running",
-                               "Only files identical to a known malware sample are stopped. "
-                               "Anything less certain is shown to you as a warning and still runs.")
+        self.t_block = _Toggle("Also stop known malware from running",
+                               "Off by default. Qlam warns about files you run either way; with this on, "
+                               "files identical to a known malware sample are also stopped. Every program "
+                               "start then briefly waits for Qlam's check.")
         self.t_autoq = _Toggle("Move known malware to quarantine automatically",
                                "Off by default: Qlam tells you and you decide. When on, this applies only "
                                "to exact matches with known malware, never to pattern-based warnings.")

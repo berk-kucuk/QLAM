@@ -1,9 +1,13 @@
 //! On-access protection with fanotify.
 //!
 //! Two event types, on every filesystem that holds a scope location:
-//!   - FAN_OPEN_EXEC_PERM: the kernel holds an exec until we answer. Only
-//!     confirmed detections (exact known-malware hashes) are ever denied;
-//!     everything else is allowed and, if it matched a pattern, reported.
+//!   - An exec. By default (`block_exec` off) this is a plain notification,
+//!     FAN_OPEN_EXEC in a FAN_CLASS_NOTIF group: the file is scanned in the
+//!     background and the user warned, and the kernel never waits for us.
+//!     With `block_exec` on it is FAN_OPEN_EXEC_PERM: the kernel holds the
+//!     exec until we answer. Only confirmed detections (exact known-malware
+//!     hashes) are ever denied; everything else is allowed and, if it
+//!     matched a pattern, reported.
 //!   - FAN_CLOSE_WRITE: a file was just written (a finished download, an
 //!     extracted archive, a dropped script). Scanned in the background so the
 //!     user is warned before anyone runs it. Scripts need this path:
@@ -13,6 +17,9 @@
 //! included); those are answered immediately after a path-prefix check.
 //!
 //! # The exec path must never stall
+//!
+//! (Only relevant with `block_exec` on; a notification group cannot stall
+//! anything.)
 //!
 //! While an exec permission event is unanswered, the process that called
 //! execve() sleeps in the kernel, and only closing the fanotify descriptor —
@@ -32,7 +39,7 @@
 //!      panics), the whole process exits at once (supervise.rs). The kernel
 //!      then allows every pending event, and systemd restarts the daemon.
 //!   4. Descriptors are bounded: write scans queue a path and file identity,
-//!      not a descriptor ([`WriteJob`]); exec checks beyond
+//!      not a descriptor ([`ScanJob`]); exec checks beyond
 //!      [`exec_backlog_limit`] are allowed on the spot; the service raises
 //!      its descriptor limit to 524288.
 
@@ -183,14 +190,17 @@ struct Job {
     ticket: u64,
 }
 
-/// A written file waiting for a background scan. It holds the path and the
-/// identity the file had when the write finished, not a descriptor: this
-/// queue can be thousands deep during a burst of writes, and descriptors
-/// parked in it used to exhaust the process's limit (2026-09-30).
-struct WriteJob {
+/// A file waiting for a background scan: just written, or (when execs are
+/// not blocked) just executed. It holds the path and the identity the file
+/// had at the event, not a descriptor: this queue can be thousands deep
+/// during a burst of writes, and descriptors parked in it used to exhaust
+/// the process's limit (2026-09-30).
+struct ScanJob {
     path: PathBuf,
     key: FileKey,
     pid: i32,
+    /// An exec notification rather than a write.
+    exec: bool,
 }
 
 /// Open a written file again for its background scan — but only if it is
@@ -310,7 +320,10 @@ pub struct Realtime {
 
 impl Realtime {
     pub fn start(cfg: &Config, guard: Arc<Guard>) -> io::Result<Realtime> {
-        let flags = libc::FAN_CLASS_CONTENT | libc::FAN_CLOEXEC | libc::FAN_UNLIMITED_QUEUE | libc::FAN_UNLIMITED_MARKS;
+        // Without exec blocking the group is a notification group: the kernel
+        // then cannot make anything wait for us, whatever happens here.
+        let class = if cfg.block_exec { libc::FAN_CLASS_CONTENT } else { libc::FAN_CLASS_NOTIF };
+        let flags = class | libc::FAN_CLOEXEC | libc::FAN_UNLIMITED_QUEUE | libc::FAN_UNLIMITED_MARKS;
         let raw = unsafe { libc::fanotify_init(flags, (libc::O_RDONLY | libc::O_LARGEFILE | libc::O_CLOEXEC) as u32) };
         if raw < 0 {
             return Err(io::Error::last_os_error());
@@ -321,7 +334,7 @@ impl Realtime {
         let mask = if cfg.block_exec {
             libc::FAN_OPEN_EXEC_PERM | libc::FAN_CLOSE_WRITE
         } else {
-            libc::FAN_CLOSE_WRITE
+            libc::FAN_OPEN_EXEC | libc::FAN_CLOSE_WRITE
         };
 
         let mut marked = HashSet::new();
@@ -343,19 +356,22 @@ impl Realtime {
         });
 
         let (exec_tx, exec_rx) = unbounded::<Job>();
-        let (bg_tx, bg_rx) = bounded::<WriteJob>(4096);
+        let (bg_tx, bg_rx) = bounded::<ScanJob>(4096);
         let stopping = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
 
         // The reader, the exec workers and the watchdog are the exec path:
-        // spawn_critical ends the process if one of them dies.
-        for i in 0..cfg.exec_workers {
+        // spawn_critical ends the process if one of them dies. Exec workers
+        // and the watchdog only exist when execs are blocked.
+        let exec_workers = if cfg.block_exec { cfg.exec_workers } else { 0 };
+        for i in 0..exec_workers {
             let (s, rx) = (shared.clone(), exec_rx.clone());
             threads.push(spawn_critical(&format!("exec-{i}"), stopping.clone(), move || exec_worker(s, rx)));
         }
+        drop(exec_rx);
         for i in 0..cfg.background_workers {
             let (s, rx) = (shared.clone(), bg_rx.clone());
-            threads.push(spawn(&format!("write-{i}"), move || write_worker(s, rx)));
+            threads.push(spawn(&format!("scan-{i}"), move || scan_worker(s, rx)));
         }
         {
             let s = shared.clone();
@@ -370,12 +386,16 @@ impl Realtime {
             let stop_fd = stop.as_raw_fd();
             threads.push(spawn("mount-watch", move || mount_watcher(s, scope, mask, marked, stop_fd)));
         }
-        {
+        if cfg.block_exec {
             let s = shared.clone();
             let stop_fd = stop.as_raw_fd();
             threads.push(spawn_critical("exec-watchdog", stopping.clone(), move || watchdog(s, stop_fd)));
         }
-        log::info!("real-time protection on (blocking confirmed detections: {})", cfg.block_exec);
+        if cfg.block_exec {
+            log::info!("real-time protection on: warning, and blocking execution of known malware");
+        } else {
+            log::info!("real-time protection on: warning only, nothing waits for Qlam");
+        }
         Ok(Realtime { stop, stopping, threads, stats })
     }
 
@@ -506,7 +526,7 @@ impl Throttle {
 /// The only thread reading the fanotify descriptor, so it must never stop
 /// while protection is on: every error is retried, except the few that mean
 /// the loop itself is broken, which end the process (see supervise.rs).
-fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg_tx: Sender<WriteJob>) {
+fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg_tx: Sender<ScanJob>) {
     let me = std::process::id() as i32;
     let meta_len = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut buf = vec![0u8; 256 * 1024];
@@ -613,8 +633,9 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
                 if let Err(e) = exec_tx.send(Job { fd, pid: m.pid, path, ticket }) {
                     s.answer(e.0.ticket, true);
                 }
-            } else if m.mask & libc::FAN_CLOSE_WRITE != 0 {
-                if is_browser_shm(&path) {
+            } else if m.mask & (libc::FAN_CLOSE_WRITE | libc::FAN_OPEN_EXEC) != 0 {
+                let exec = m.mask & libc::FAN_OPEN_EXEC != 0;
+                if !exec && is_browser_shm(&path) {
                     continue;
                 }
                 let now = Instant::now();
@@ -631,7 +652,7 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
                 if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_size as u64 > s.max_size {
                     continue;
                 }
-                let job = WriteJob { path, key: FileKey::of(&st), pid: m.pid };
+                let job = ScanJob { path, key: FileKey::of(&st), pid: m.pid, exec };
                 if let Err(TrySendError::Full(_)) = bg_tx.try_send(job) {
                     s.stats.dropped.fetch_add(1, Ordering::Relaxed);
                 }
@@ -668,15 +689,21 @@ fn exec_worker(s: Arc<Shared>, rx: Receiver<Job>) {
     }
 }
 
-fn write_worker(s: Arc<Shared>, rx: Receiver<WriteJob>) {
+fn scan_worker(s: Arc<Shared>, rx: Receiver<ScanJob>) {
     // Background scans shouldn't compete with the user's foreground work.
     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
     let mut buf = Vec::new();
     for job in rx {
         let Some(file) = reopen(&job.path, &job.key) else { continue };
-        s.stats.writes_scanned.fetch_add(1, Ordering::Relaxed);
+        let trigger = if job.exec {
+            s.stats.exec_checked.fetch_add(1, Ordering::Relaxed);
+            Trigger::Exec { pid: job.pid, blocked: false }
+        } else {
+            s.stats.writes_scanned.fetch_add(1, Ordering::Relaxed);
+            Trigger::Write { pid: job.pid }
+        };
         let result = s.verdict(file.as_fd(), &job.path, &mut buf);
-        report(&s, file.as_fd(), &job.path, result, Trigger::Write { pid: job.pid }, &mut buf);
+        report(&s, file.as_fd(), &job.path, result, trigger, &mut buf);
     }
 }
 
@@ -926,7 +953,9 @@ mod tests {
         let prog = dir.join("true");
         std::fs::copy("/bin/true", &prog).unwrap();
 
+        // The permission-event path is the one that can stall execs.
         let cfg = Config {
+            block_exec: true,
             scope: vec![dir.to_string_lossy().into_owned()],
             exec_workers: 2,
             background_workers: 1,

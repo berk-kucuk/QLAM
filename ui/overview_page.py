@@ -195,9 +195,10 @@ class OverviewPage(QWidget):
                            "for an hour as a precaution. Findings are still reported.",
                            "Review", self.go_alerts.emit)
         else:
+            stopped = " Known malware is also stopped before it can run." if rt.get("block_exec") else ""
             self._set_hero("ok", "fa5s.shield-alt", p["good"], "You're protected",
-                           "Downloads and new files are checked as they arrive, and known malware "
-                           "is stopped before it can run.", None, None)
+                           "New files and programs you run are checked, and you are warned "
+                           "if something looks wrong." + stopped, None, None)
 
         # Real-time.
         if rt.get("active"):
@@ -209,7 +210,7 @@ class OverviewPage(QWidget):
             self.rt.detail.setText(
                 "files checked since start"
                 + (f" · {blocked} blocked" if blocked else "")
-                + ("" if rt.get("block_exec") else " · blocking off"))
+                + (" · known malware is stopped" if rt.get("block_exec") else " · warn only"))
         else:
             self.rt.chip.setText("Off")
             self.rt.chip.set_level("warn")

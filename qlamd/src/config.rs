@@ -33,7 +33,10 @@ pub struct Config {
     /// On-access protection (fanotify). Off means on-demand scans only.
     pub realtime: bool,
     /// Deny execution of *confirmed* detections (exact known-malware hash).
-    /// Pattern matches are never blocked, only reported.
+    /// Pattern matches are never blocked, only reported. Off by default:
+    /// blocking needs fanotify permission events, which make every program
+    /// start on the watched filesystems wait for Qlam's answer. Without it,
+    /// executed files are still scanned and reported, just not stopped.
     pub block_exec: bool,
     /// Also move confirmed detections to quarantine without asking. Off by
     /// default: Qlam warns and the user decides.
@@ -59,7 +62,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             realtime: true,
-            block_exec: true,
+            block_exec: false,
             auto_quarantine: false,
             max_file_size_mb: 100,
             scope: vec![
