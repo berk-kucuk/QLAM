@@ -23,6 +23,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::fmt::Display;
+use std::fs::File;
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -112,12 +114,46 @@ impl Cache {
 
 // ── Plumbing ─────────────────────────────────────────────────────────────
 
+/// An exec waiting for a verdict. It holds the event's descriptor, which the
+/// answer to the kernel refers to.
 struct Job {
     fd: OwnedFd,
     pid: i32,
     path: PathBuf,
-    /// Pending-exec ticket; 0 for notification (write) events.
+    /// Pending-exec ticket, see [`Pending`].
     ticket: u64,
+}
+
+/// A written file waiting for a background scan. It holds the path and the
+/// identity the file had when the write finished, not a descriptor: this
+/// queue can be thousands deep during a burst of writes, and descriptors
+/// parked in it used to exhaust the process's limit (2026-09-30).
+struct WriteJob {
+    path: PathBuf,
+    key: FileKey,
+    pid: i32,
+}
+
+/// Open a written file again for its background scan — but only if it is
+/// still the file that was written: same inode, size, mtime and ctime.
+/// Anything else (rewritten, replaced, deleted, swapped for a symlink) is
+/// skipped; a rewrite produces a close-write event of its own.
+fn reopen(path: &Path, key: &FileKey) -> Option<File> {
+    let open = |extra: i32| {
+        File::options()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | extra)
+            .open(path)
+    };
+    // O_NOATIME keeps scans from touching access times; only the owner or
+    // CAP_FOWNER may use it, so fall back without it.
+    let f = match open(libc::O_NOATIME) {
+        Err(e) if e.raw_os_error() == Some(libc::EPERM) => open(0),
+        other => other,
+    }
+    .ok()?;
+    let st = fsutil::fstat(f.as_fd()).ok()?;
+    ((st.st_mode & libc::S_IFMT) == libc::S_IFREG && FileKey::of(&st) == *key).then_some(f)
 }
 
 /// Exec events waiting for an answer, so the watchdog can find overdue ones.
@@ -245,7 +281,7 @@ impl Realtime {
         });
 
         let (exec_tx, exec_rx) = unbounded::<Job>();
-        let (bg_tx, bg_rx) = bounded::<Job>(4096);
+        let (bg_tx, bg_rx) = bounded::<WriteJob>(4096);
         let stopping = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
 
@@ -365,7 +401,7 @@ impl Throttle {
 /// The only thread reading the fanotify descriptor, so it must never stop
 /// while protection is on: every error is retried, except the few that mean
 /// the loop itself is broken, which end the process (see supervise.rs).
-fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg_tx: Sender<Job>) {
+fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg_tx: Sender<WriteJob>) {
     let me = std::process::id() as i32;
     let meta_len = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut buf = vec![0u8; 256 * 1024];
@@ -464,7 +500,14 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
                     recent.retain(|_, t| now.duration_since(*t) < WRITE_DEBOUNCE);
                 }
                 recent.insert(path.clone(), now);
-                if let Err(TrySendError::Full(_)) = bg_tx.try_send(Job { fd, pid: m.pid, path, ticket: 0 }) {
+                // Note what was written and let the descriptor go now (it
+                // closes when `fd` drops at the end of this iteration).
+                let Ok(st) = fsutil::fstat(fd.as_fd()) else { continue };
+                if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_size as u64 > s.max_size {
+                    continue;
+                }
+                let job = WriteJob { path, key: FileKey::of(&st), pid: m.pid };
+                if let Err(TrySendError::Full(_)) = bg_tx.try_send(job) {
                     s.stats.dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -491,33 +534,42 @@ fn exec_worker(s: Arc<Shared>, rx: Receiver<Job>) {
             s.stats.exec_blocked.fetch_add(1, Ordering::Relaxed);
             s.guard.record_action();
         }
-        report(&s, &job, result, Trigger::Exec { pid: job.pid, blocked: deny }, &mut buf);
+        let trigger = Trigger::Exec { pid: job.pid, blocked: deny };
+        report(&s, job.fd.as_fd(), &job.path, result, trigger, &mut buf);
     }
 }
 
-fn write_worker(s: Arc<Shared>, rx: Receiver<Job>) {
+fn write_worker(s: Arc<Shared>, rx: Receiver<WriteJob>) {
     // Background scans shouldn't compete with the user's foreground work.
     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
     let mut buf = Vec::new();
     for job in rx {
+        let Some(file) = reopen(&job.path, &job.key) else { continue };
         s.stats.writes_scanned.fetch_add(1, Ordering::Relaxed);
-        let result = s.verdict(job.fd.as_fd(), &job.path, &mut buf);
-        report(&s, &job, result, Trigger::Write { pid: job.pid }, &mut buf);
+        let result = s.verdict(file.as_fd(), &job.path, &mut buf);
+        report(&s, file.as_fd(), &job.path, result, Trigger::Write { pid: job.pid }, &mut buf);
     }
 }
 
-fn report(s: &Shared, job: &Job, result: Option<(Cached, Option<Verdict>)>, trigger: Trigger, buf: &mut Vec<u8>) {
+fn report(
+    s: &Shared,
+    fd: BorrowedFd<'_>,
+    path: &Path,
+    result: Option<(Cached, Option<Verdict>)>,
+    trigger: Trigger,
+    buf: &mut Vec<u8>,
+) {
     let verdict = match result {
         None | Some(((Severity::Clean, _), _)) => return,
         Some((_, Some(v))) => v,
         // Cached non-clean verdict: rescan to get the name for the report.
         // Rare (the file was already handled), so the cost doesn't matter.
-        Some((_, None)) => match s.guard.engine.scan_fd(job.fd.as_fd(), &job.path, s.max_size, buf) {
+        Some((_, None)) => match s.guard.engine.scan_fd(fd, path, s.max_size, buf) {
             Ok(v) if v.severity != Severity::Clean => v,
             _ => return,
         },
     };
-    s.guard.handle(job.fd.as_fd(), &job.path, &verdict, trigger);
+    s.guard.handle(fd, path, &verdict, trigger);
 }
 
 /// Allow any exec that has waited past the deadline.
@@ -677,6 +729,37 @@ mod tests {
         for n in [libc::EBADF, libc::EFAULT, libc::EINVAL] {
             assert_eq!(classify(&e(n)), OnError::Fatal, "errno {n}");
         }
+    }
+
+    #[test]
+    fn write_jobs_reopen_only_the_file_that_was_written() {
+        let dir = std::env::temp_dir().join(format!("qlam-reopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("download.bin");
+        std::fs::write(&path, b"first").unwrap();
+        let key_of = |p: &Path| FileKey::of(&fsutil::fstat(File::open(p).unwrap().as_fd()).unwrap());
+        let key = key_of(&path);
+
+        assert!(reopen(&path, &key).is_some(), "unchanged file");
+
+        // Rewritten after the event: ctime and size differ.
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(&path, b"second, longer").unwrap();
+        assert!(reopen(&path, &key).is_none(), "rewritten file");
+
+        // Replaced by a symlink to another file.
+        let key = key_of(&path);
+        let other = dir.join("other");
+        std::fs::write(&other, b"x").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        assert!(reopen(&path, &key).is_none(), "symlink");
+
+        // Gone.
+        std::fs::remove_file(&path).unwrap();
+        assert!(reopen(&path, &key).is_none(), "deleted file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
