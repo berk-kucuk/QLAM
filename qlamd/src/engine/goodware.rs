@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::config::{feeds_dir, BUNDLED_RULES_DIR};
+use crate::config::{bundled_rules_dir, feeds_dir};
 
 pub struct KnownGood {
     hashes: HashSet<String>,
@@ -30,7 +30,7 @@ impl KnownGood {
     pub fn load() -> KnownGood {
         let mut hashes = HashSet::new();
         let dev = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/rules"));
-        for dir in [PathBuf::from(BUNDLED_RULES_DIR), dev, feeds_dir()] {
+        for dir in [bundled_rules_dir(), dev, feeds_dir()] {
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
             for p in rd.flatten().map(|e| e.path()) {
                 let is_list = p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("known-good") && n.ends_with(".txt"));

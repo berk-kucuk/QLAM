@@ -35,7 +35,8 @@ pub struct Event {
     /// What was done, in words, e.g. "execution blocked, moved to quarantine".
     pub action: String,
     /// How it was settled: "" (open), "quarantined" or "trusted" by the
-    /// user, or "gone" when the file no longer exists.
+    /// user, "gone" when the file no longer exists, or "cleared" when the
+    /// current signatures no longer flag it.
     pub resolution: String,
 }
 
@@ -232,6 +233,30 @@ impl Store {
         rows.map(|it| it.flatten().collect()).unwrap_or_default()
     }
 
+    /// (path, detection) of open findings about a file's content.
+    pub fn open_content_findings(&self) -> Vec<(String, String)> {
+        let db = self.conn();
+        let Ok(mut stmt) = db.prepare(
+            "SELECT DISTINCT path, detection FROM events WHERE resolution = '' AND sha256 != ''
+             AND kind IN ('blocked', 'warning', 'suspicious')",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+        rows.map(|it| it.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Settle the open findings about `path` with detection `detection`.
+    pub fn resolve_detection(&self, path: &str, detection: &str, resolution: &str) {
+        let r = self.conn().execute(
+            "UPDATE events SET resolution = ?1 WHERE resolution = '' AND path = ?2 AND detection = ?3",
+            params![resolution, path, detection],
+        );
+        if let Err(e) = r {
+            log::error!("resolve: {e}");
+        }
+    }
+
     /// Settle every open finding about `path` as `resolution`.
     pub fn resolve_path(&self, path: &str, resolution: &str) {
         let r = self.conn().execute(
@@ -401,5 +426,19 @@ mod tests {
         assert_eq!(s.open_paths(), ["/tmp/b"]);
         assert_eq!(s.open_count(None), 1);
         assert!(s.events(None, 10).iter().filter(|e| e.path == "/tmp/a").all(|e| e.resolution == "gone"));
+    }
+
+    #[test]
+    fn content_findings_can_be_cleared_one_detection_at_a_time() {
+        let s = Store::in_memory();
+        let ev = |det: &str| Event { detection: det.into(), sha256: "ab".into(), ..finding("/tmp/x", "warning") };
+        s.add_event(&ev("Rule.A"));
+        s.add_event(&ev("Rule.B"));
+        s.add_event(&finding("/tmp/y", "persistence")); // no content: not rechecked
+        let mut open = s.open_content_findings();
+        open.sort();
+        assert_eq!(open, [("/tmp/x".to_string(), "Rule.A".to_string()), ("/tmp/x".into(), "Rule.B".into())]);
+        s.resolve_detection("/tmp/x", "Rule.A", "cleared");
+        assert_eq!(s.open_content_findings(), [("/tmp/x".to_string(), "Rule.B".to_string())]);
     }
 }

@@ -108,6 +108,7 @@ fn run_daemon(session: bool) -> i32 {
         if sig == libc::SIGHUP {
             log::info!("SIGHUP: reloading signatures");
             d.guard.engine.reload();
+            d.recheck_open_findings();
             continue;
         }
         break;

@@ -183,6 +183,7 @@ class AlertsPage(QWidget):
             "quarantined": "Moved to quarantine",
             "trusted": "Trusted by you",
             "gone": "The file no longer exists; nothing to do",
+            "cleared": "No longer flagged by the current signatures (it was a false alarm)",
         }.get(ev.get("resolution", ""), "Waiting for your decision" if is_open(ev) else ev.get("action", ""))
         if is_open(ev) and not exists and ev.get("kind") != "persistence":
             status = "The file no longer exists"

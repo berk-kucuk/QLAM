@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE: &str = "/etc/qlam/qlamd.toml";
-pub const BUNDLED_RULES_DIR: &str = "/usr/share/qlam/rules";
+/// Rules and lists shipped with Qlam; QLAM_RULES_DIR overrides it for
+/// development and tests.
+pub fn bundled_rules_dir() -> PathBuf {
+    std::env::var_os("QLAM_RULES_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/usr/share/qlam/rules"))
+}
 
 /// State directory (/var/lib/qlam). QLAM_STATE_DIR overrides it for
 /// development; the systemd unit never sets it.

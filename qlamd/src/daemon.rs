@@ -170,8 +170,52 @@ impl Daemon {
         .to_string()
     }
 
+    /// Scan the files of open findings again with the current signatures and
+    /// settle the ones that are no longer flagged as "cleared". This is how a
+    /// fix to a rule that raised false alarms also withdraws the alarms it
+    /// already raised, instead of leaving them for the user to dismiss. Runs
+    /// at startup and after every signature reload; there are few findings.
+    pub fn recheck_open_findings(&self) {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let store = &self.guard.store;
+        let mut buf = Vec::new();
+        let mut cleared = 0;
+        for (path, detection) in store.open_content_findings() {
+            let Ok(f) = std::fs::File::options()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+                .open(&path)
+            else {
+                continue; // gone or unreadable: sweep_gone handles the former
+            };
+            if !f.metadata().is_ok_and(|m| m.is_file()) {
+                continue;
+            }
+            let verdict = self.guard.engine.scan_fd(f.as_fd(), Path::new(&path), RECHECK_MAX_SIZE, &mut buf);
+            crate::fsutil::trim_buffer(&mut buf);
+            if verdict.is_ok_and(|v| v.severity == crate::engine::Severity::Clean) {
+                store.resolve_detection(&path, &detection, "cleared");
+                cleared += 1;
+            }
+        }
+        if cleared > 0 {
+            log::info!("{cleared} earlier finding(s) no longer flagged by the current signatures; cleared");
+            self.guard.notify(Notice::StatusChanged);
+        }
+    }
+
+    fn recheck_in_background(self: &Arc<Self>) {
+        let me = self.clone();
+        let _ = std::thread::Builder::new().name("recheck".into()).spawn(move || {
+            crate::fsutil::lower_priority(crate::fsutil::IoPriority::Idle, 19);
+            me.recheck_open_findings();
+        });
+    }
+
     /// Reload signatures whenever the updater publishes a new state.json.
     pub fn watch_feeds(self: &Arc<Self>) {
+        self.recheck_in_background();
         let me = self.clone();
         std::thread::Builder::new()
             .name("feed-watch".into())
@@ -186,12 +230,16 @@ impl Daemon {
                         log::info!("feeds changed; reloading signatures");
                         me.guard.engine.reload();
                         me.guard.notify(Notice::StatusChanged);
+                        me.recheck_open_findings();
                     }
                 }
             })
             .expect("spawn feed watcher");
     }
 }
+
+/// Files of findings are rechecked up to this size.
+const RECHECK_MAX_SIZE: u64 = 100 * 1024 * 1024;
 
 fn set_cfg_bool(cfg: &mut Config, key: &str, v: bool) {
     match key {
