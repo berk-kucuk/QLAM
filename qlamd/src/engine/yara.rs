@@ -5,9 +5,9 @@
 //!   - `qlam_severity = "malicious" | "suspicious"` on Qlam's bundled rules,
 //!     plus `qlam_confirmed = true` on the few rules that identify a file
 //!     exactly (the EICAR test file) rather than by pattern;
-//!   - YARA Forge's `score` (0-100) on feed rules: >= 90 malicious,
-//!     >= 70 suspicious; lower-scored and unscored feed rules are ignored,
-//!     since they are the ones that fire on legitimate files.
+//!   - YARA Forge's `score` (0-100) on feed rules: 90 and up is malicious,
+//!     70 and up suspicious; lower-scored and unscored feed rules are
+//!     ignored, since they are the ones that fire on legitimate files.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -5,6 +5,7 @@
 //!     hash), which changes nothing on disk;
 //!   - quarantining confirmed detections, only if the admin turned
 //!     auto-quarantine on (off by default).
+//!
 //! Everything else — pattern matches, heuristics, persistence findings — is a
 //! warning, and the user decides: quarantine it, or trust it.
 //!

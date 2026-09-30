@@ -124,7 +124,7 @@ impl Builder {
     }
 
     fn sorted(mut self) -> Self {
-        self.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        self.entries.sort_unstable_by_key(|e| e.0);
         self.entries.dedup_by(|a, b| a.0 == b.0);
         self
     }
