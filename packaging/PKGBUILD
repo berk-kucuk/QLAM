@@ -2,7 +2,7 @@
 
 pkgname=qlam
 pkgver=2.0.0
-pkgrel=5
+pkgrel=6
 pkgdesc="Warn-first antivirus for Linux: on-access protection for user files, with a desktop app"
 arch=('x86_64')
 url="https://github.com/berk-kucuk/QLAM"
