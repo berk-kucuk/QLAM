@@ -183,12 +183,17 @@ impl Guard {
         }
         let auto_q = verdict.is_confirmed() && self.auto_quarantine.load(Ordering::Relaxed) && self.may_act();
         if auto_q {
-            let outcome = quarantine::quarantine(&self.store, fd, path, verdict);
             self.record_action();
-            action.push(outcome.describe().to_string());
-            ev.kind = if outcome.item.is_some() { "quarantined" } else { "warning" }.into();
-            if outcome.item.is_some() {
-                ev.resolution = "quarantined".into();
+            match quarantine::quarantine(&self.store, fd, path, verdict, &verdict.sha256) {
+                Ok(_) => {
+                    action.push("moved to quarantine".into());
+                    ev.kind = "quarantined".into();
+                    ev.resolution = "quarantined".into();
+                }
+                Err(e) => {
+                    action.push(format!("could not be quarantined ({e}); the file was left as it was"));
+                    ev.kind = "warning".into();
+                }
             }
         } else {
             action.push("no changes made; review in Qlam".into());
@@ -250,15 +255,8 @@ impl Guard {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
             .open(&ev.path)?;
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::other("not a regular file"));
-        }
-        let mut buf = Vec::new();
-        fsutil::read_from_start(file.as_fd(), &mut buf, 2 * 1024 * 1024 * 1024)?;
-        let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&buf));
-        if sha != ev.sha256 {
-            return Err(io::Error::other("the file has changed since it was detected; scan it again"));
-        }
+        // Content is checked against ev.sha256 by quarantine() itself, on the
+        // very bytes it stores.
         let verdict = Verdict {
             severity: if ev.severity == "malicious" { Severity::Malicious } else { Severity::Suspicious },
             confirmed: ev.confirmed,
@@ -266,16 +264,13 @@ impl Guard {
             engine: ev.engine.clone(),
             sha256: ev.sha256.clone(),
         };
-        let outcome = quarantine::quarantine(&self.store, file.as_fd(), Path::new(&ev.path), &verdict);
-        if outcome.item.is_none() {
-            return Err(io::Error::other(outcome.describe()));
-        }
+        quarantine::quarantine(&self.store, file.as_fd(), Path::new(&ev.path), &verdict, &ev.sha256)?;
         self.store.resolve(ev, "quarantined");
         let mut done = ev.clone();
         done.ts = now();
         done.kind = "quarantined".into();
         done.resolution = "quarantined".into();
-        done.action = format!("{} at the user's request", outcome.describe());
+        done.action = "moved to quarantine at the user's request".into();
         done.id = self.store.add_event(&done);
         self.notify(Notice::Threat(done));
         Ok(())
