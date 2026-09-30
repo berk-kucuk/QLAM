@@ -9,12 +9,32 @@
 //!     user is warned before anyone runs it. Scripts need this path:
 //!     `bash x.sh` opens x.sh as data, it is never exec'd.
 //!
-//! Marks are per filesystem, so events for system paths arrive too; those are
-//! answered immediately after a path-prefix check. Anything that goes wrong
-//! answers "allow": an antivirus that wedges every exec on the machine is
-//! worse than one that misses a file. A watchdog allows any exec left
-//! unanswered past a short deadline, and if the daemon dies the kernel
-//! releases pending events on its own.
+//! Marks are per filesystem, so events for system paths arrive too ("/"
+//! included); those are answered immediately after a path-prefix check.
+//!
+//! # The exec path must never stall
+//!
+//! While an exec permission event is unanswered, the process that called
+//! execve() sleeps in the kernel, and only closing the fanotify descriptor —
+//! in practice, this process exiting — makes the kernel give up on us. On
+//! 2026-09-30 the reader thread died on EMFILE while the process lived on,
+//! and every exec on the machine hung until a hard reset. The guarantees:
+//!
+//!   1. Every exec that reaches a worker is answered within
+//!      [`EXEC_DEADLINE`]: the watchdog allows whatever the workers haven't
+//!      decided by then. Anything that goes wrong answers "allow".
+//!   2. The reader never stops while protection is on. Per-event and resource
+//!      errors are retried (see [`classify`]); running out of descriptors
+//!      spends a [`Reserve`] and otherwise only pauses for [`BACKOFF`], so the
+//!      queue keeps draining — during total exhaustion the kernel denies an
+//!      exec it cannot hand us, but nothing waits indefinitely.
+//!   3. If the reader, an exec worker or the watchdog ends anyway (returns or
+//!      panics), the whole process exits at once (supervise.rs). The kernel
+//!      then allows every pending event, and systemd restarts the daemon.
+//!   4. Descriptors are bounded: write scans queue a path and file identity,
+//!      not a descriptor ([`WriteJob`]); exec checks beyond
+//!      [`exec_backlog_limit`] are allowed on the spot; the service raises
+//!      its descriptor limit to 524288.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
