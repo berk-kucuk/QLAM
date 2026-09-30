@@ -182,6 +182,7 @@ class AlertsPage(QWidget):
         status = {
             "quarantined": "Moved to quarantine",
             "trusted": "Trusted by you",
+            "gone": "The file no longer exists; nothing to do",
         }.get(ev.get("resolution", ""), "Waiting for your decision" if is_open(ev) else ev.get("action", ""))
         if is_open(ev) and not exists and ev.get("kind") != "persistence":
             status = "The file no longer exists"

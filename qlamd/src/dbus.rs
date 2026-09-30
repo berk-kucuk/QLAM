@@ -112,6 +112,7 @@ impl Service {
 
     async fn events(&self, limit: u32, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> fdo::Result<String> {
         let uid = caller_uid(conn, &hdr).await?;
+        self.d.sweep_gone();
         let evs = self.d.guard.store.events(user_filter(uid), limit.min(1000));
         serde_json::to_string(&evs).map_err(err)
     }

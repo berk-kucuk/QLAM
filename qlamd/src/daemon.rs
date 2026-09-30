@@ -107,7 +107,22 @@ impl Daemon {
         }
     }
 
+    /// Close findings whose file no longer exists: a temporary file that was
+    /// deleted, a download the user removed. Nothing is left to decide about,
+    /// and keeping them "open" would only nag. Cheap: one lstat per open
+    /// finding, and there are few.
+    pub fn sweep_gone(&self) {
+        let store = &self.guard.store;
+        for path in store.open_paths() {
+            let gone = matches!(std::fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+            if gone {
+                store.resolve_path(&path, "gone");
+            }
+        }
+    }
+
     pub fn status_json(&self, uid: u32) -> String {
+        self.sweep_gone();
         let cfg = self.config();
         let user = (uid != 0).then_some(uid);
         let store = &self.guard.store;

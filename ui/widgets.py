@@ -64,6 +64,8 @@ def level(ev: dict) -> str:
 def chip_for(ev: dict) -> tuple[str, str]:
     """(text, level) for the small status chip of a finding."""
     settled = ev.get("resolution") or ("quarantined" if ev.get("kind") == "quarantined" else "")
+    if settled == "gone":
+        return "Gone", "info"
     if settled:
         return settled.capitalize(), "good"
     lvl = level(ev)

@@ -34,7 +34,8 @@ pub struct Event {
     pub process: String,
     /// What was done, in words, e.g. "execution blocked, moved to quarantine".
     pub action: String,
-    /// How the user settled it: "" (open), "quarantined" or "trusted".
+    /// How it was settled: "" (open), "quarantined" or "trusted" by the
+    /// user, or "gone" when the file no longer exists.
     pub resolution: String,
 }
 
@@ -218,6 +219,30 @@ impl Store {
         }
     }
 
+    /// Paths of open findings, one per path.
+    pub fn open_paths(&self) -> Vec<String> {
+        let db = self.conn();
+        let Ok(mut stmt) = db.prepare(
+            "SELECT DISTINCT path FROM events WHERE resolution = ''
+             AND kind IN ('blocked', 'warning', 'suspicious', 'persistence')",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0));
+        rows.map(|it| it.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Settle every open finding about `path` as `resolution`.
+    pub fn resolve_path(&self, path: &str, resolution: &str) {
+        let r = self.conn().execute(
+            "UPDATE events SET resolution = ?1 WHERE resolution = '' AND path = ?2",
+            params![resolution, path],
+        );
+        if let Err(e) = r {
+            log::error!("resolve: {e}");
+        }
+    }
+
     // ── Quarantine ───────────────────────────────────────────────────────
 
     pub fn quarantine_add(&self, q: &QuarantineItem) -> rusqlite::Result<()> {
@@ -351,4 +376,30 @@ fn row_to_quarantine(r: &rusqlite::Row<'_>) -> rusqlite::Result<QuarantineItem> 
         detection: r.get(8)?,
         engine: r.get(9)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finding(path: &str, kind: &str) -> Event {
+        Event { ts: now(), kind: kind.into(), path: path.into(), severity: "suspicious".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn findings_about_a_path_can_be_settled_together() {
+        let s = Store::in_memory();
+        s.add_event(&finding("/tmp/a", "warning"));
+        s.add_event(&finding("/tmp/a", "suspicious"));
+        s.add_event(&finding("/tmp/b", "warning"));
+        s.add_event(&finding("/tmp/c", "quarantined")); // not a finding to decide on
+        let mut open = s.open_paths();
+        open.sort();
+        assert_eq!(open, ["/tmp/a", "/tmp/b"]);
+
+        s.resolve_path("/tmp/a", "gone");
+        assert_eq!(s.open_paths(), ["/tmp/b"]);
+        assert_eq!(s.open_count(None), 1);
+        assert!(s.events(None, 10).iter().filter(|e| e.path == "/tmp/a").all(|e| e.resolution == "gone"));
+    }
 }
