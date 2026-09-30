@@ -16,7 +16,7 @@ import os
 from PyQt6.QtCore import QMetaType, QObject, pyqtSignal, pyqtSlot
 from PyQt6.QtDBus import (
     QDBusArgument, QDBusConnection, QDBusInterface, QDBusMessage,
-    QDBusPendingCallWatcher, QDBusServiceWatcher, QDBusUnixFileDescriptor,
+    QDBusPendingCallWatcher, QDBusPendingReply, QDBusServiceWatcher, QDBusUnixFileDescriptor,
 )
 
 SERVICE = "org.maze.Qlam1"
@@ -89,14 +89,14 @@ class QlamClient(QObject):
 
         def finished(w: QDBusPendingCallWatcher):
             self._watchers.discard(w)
-            reply = w.reply()
+            w.deleteLater()
+            reply = QDBusPendingReply(w).reply()
             if reply.type() == QDBusMessage.MessageType.ErrorMessage:
                 if fail:
                     fail(_friendly(reply.errorName(), reply.errorMessage()))
             elif done:
                 out = reply.arguments()
                 done(out[0] if out else None)
-            w.deleteLater()
 
         watcher.finished.connect(finished)
 

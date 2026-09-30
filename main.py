@@ -7,12 +7,13 @@
 """
 import os
 import sys
+import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtClassInfo, pyqtSlot
 from PyQt6.QtDBus import QDBusConnection, QDBusInterface
 from PyQt6.QtGui import QFont, QIcon
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from ui.theme import get_stylesheet, theme
 
@@ -37,7 +38,18 @@ class _Instance(QObject):
         self._window.show_window()
 
 
+def _report_exception(exc_type, exc, tb):
+    """PyQt6 aborts the whole app (qFatal) on an exception escaping a slot
+    unless sys.excepthook is replaced. A bug in one button must not take the
+    window down: log it, tell the user, carry on."""
+    traceback.print_exception(exc_type, exc, tb)
+    app = QApplication.instance()
+    if app is not None and not issubclass(exc_type, KeyboardInterrupt):
+        QMessageBox.warning(None, "Qlam", f"Something went wrong: {exc}\n\nDetails are in the log.")
+
+
 def main():
+    sys.excepthook = _report_exception
     os.environ.setdefault("RESOURCE_NAME", "qlam")
     tray_only = "--tray" in sys.argv
     session_bus = "--session" in sys.argv
