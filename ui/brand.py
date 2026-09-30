@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
-from PyQt6.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
 LOGOS = Path(__file__).resolve().parent.parent / "Logos"
@@ -68,34 +68,39 @@ def app_icon() -> QIcon:
 
 
 def tray_icon(state: str) -> QIcon:
-    """The bare mark for the system tray; the tail shows the state. The ring
-    is light on a dark panel and dark on a light one."""
-    app = QGuiApplication.instance()
-    dark_panel = True
-    if app is not None:
-        dark_panel = app.palette().window().color().lightness() < 128
-    ring = _RING if dark_panel else "#141414"
-    halo = "#000000" if dark_panel else "#FFFFFF"
+    """The tray icon: like the app icon, the mark on a black rounded tile,
+    with the tail showing the protection state. The tile gives the mark its
+    own background, so it reads the same on light and dark panels."""
     tail = STATE_TAIL.get(state, _TAIL)
     icon = QIcon()
     for size in (16, 22, 24, 32, 48, 64):
-        icon.addPixmap(_with_halo(mark_pixmap(size, ring, tail), mark_pixmap(size, halo, (halo, halo))))
+        icon.addPixmap(_tile(size, tail))
     return icon
 
 
-def _with_halo(mark: QPixmap, shadow: QPixmap) -> QPixmap:
-    """The mark with a one-pixel contrasting outline, so it stays readable
-    whatever colour the panel turns out to be (the app's palette is only a
-    guess at it)."""
-    dpr = mark.devicePixelRatio()
-    out = QPixmap(mark.size())
+# Share of the tile the mark takes; the rest is black margin.
+_TILE_MARK = 0.66
+
+
+def _tile(size: int, tail: tuple[str, str]) -> QPixmap:
+    app = QGuiApplication.instance()
+    dpr = app.devicePixelRatio() if app else 1.0
+    px = round(size * dpr)
+    out = QPixmap(px, px)
     out.fill(Qt.GlobalColor.transparent)
-    out.setDevicePixelRatio(dpr)
     p = QPainter(out)
-    p.setOpacity(0.55)
-    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
-        p.drawPixmap(QPointF(dx / dpr, dy / dpr), shadow)
-    p.setOpacity(1.0)
-    p.drawPixmap(0, 0, mark)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # Black tile with a faint edge, so it keeps its shape on a black panel.
+    edge = max(1.0, px / 32)
+    r = px * 0.24
+    p.setPen(QPen(QColor("#2A2A2A"), edge))
+    p.setBrush(QColor("#000000"))
+    p.drawRoundedRect(QRectF(edge / 2, edge / 2, px - edge, px - edge), r, r)
+    inner = round(px * _TILE_MARK)
+    mark = mark_pixmap(inner, _RING, tail, small=size <= 32)
+    mark.setDevicePixelRatio(1.0)  # drawn in device pixels here
+    off = (px - mark.width()) / 2
+    p.drawPixmap(QPointF(off, off), mark)
     p.end()
+    out.setDevicePixelRatio(dpr)
     return out
