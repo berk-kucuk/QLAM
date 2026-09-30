@@ -34,12 +34,18 @@ LockPersonality=yes
 MemoryDenyWriteExecute=no
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
-# Keep the daemon from being the thing the OOM killer spares while the
-# desktop dies, but don't let a big scan be its first victim either.
-OOMScoreAdjust=-100
-Nice=5
+# Stay out of the user's way. Scans run at low CPU and I/O priority and
+# weight; memory is capped (signatures take ~40 MB, each scan buffer up to
+# 50 MB). Under memory pressure Qlam goes before the user's programs: it is
+# restarted, and without exec blocking nothing depends on it meanwhile.
+Nice=10
 IOSchedulingClass=best-effort
-IOSchedulingPriority=6
+IOSchedulingPriority=7
+CPUWeight=20
+IOWeight=20
+MemoryHigh=384M
+MemoryMax=768M
+OOMScoreAdjust=200
 
 [Install]
 WantedBy=multi-user.target

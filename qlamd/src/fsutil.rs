@@ -81,3 +81,36 @@ pub fn process_uid(pid: i32) -> Option<u32> {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|u| u.parse().ok())
 }
+
+/// How much disk time a thread may take.
+#[derive(Clone, Copy)]
+pub enum IoPriority {
+    /// Only when no one else wants the disk.
+    Idle,
+    /// Lowest of the normal class: still makes progress under load.
+    Low,
+}
+
+/// Lower this thread's I/O and CPU priority (both are per-thread on Linux).
+pub fn lower_priority(io: IoPriority, nice: i32) {
+    const IOPRIO_WHO_PROCESS: libc::c_long = 1;
+    const IOPRIO_CLASS_SHIFT: libc::c_long = 13;
+    let value = match io {
+        IoPriority::Idle => 3 << IOPRIO_CLASS_SHIFT,
+        IoPriority::Low => (2 << IOPRIO_CLASS_SHIFT) | 7,
+    };
+    unsafe {
+        libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0 as libc::c_long, value);
+        libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+    }
+}
+
+/// Give back a scan buffer's memory after a large file, so one big file
+/// doesn't keep tens of megabytes allocated for good.
+pub fn trim_buffer(buf: &mut Vec<u8>) {
+    const KEEP: usize = 1 << 20;
+    if buf.capacity() > 8 * KEEP {
+        buf.clear();
+        buf.shrink_to(KEEP);
+    }
+}

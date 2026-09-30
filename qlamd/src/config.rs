@@ -64,7 +64,7 @@ impl Default for Config {
             realtime: true,
             block_exec: false,
             auto_quarantine: false,
-            max_file_size_mb: 100,
+            max_file_size_mb: 50,
             scope: vec![
                 "/home".into(),
                 "/root".into(),
@@ -78,8 +78,8 @@ impl Default for Config {
             ],
             exclude: vec![state_dir().to_string_lossy().into_owned()],
             clamd_socket: "/run/clamav/clamd.ctl".into(),
-            exec_workers: 4,
-            background_workers: 2,
+            exec_workers: 2,
+            background_workers: 1,
         }
     }
 }

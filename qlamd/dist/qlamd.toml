@@ -16,7 +16,7 @@ block_exec = false
 auto_quarantine = false
 
 # Files larger than this are not scanned on access.
-max_file_size_mb = 100
+max_file_size_mb = 50
 
 # Locations users can write to. Qlam only watches these.
 scope = ["/home", "/root", "/tmp", "/var/tmp", "/dev/shm", "/run/user", "/run/media", "/media", "/mnt"]
@@ -28,5 +28,6 @@ exclude = ["/var/lib/qlam"]
 # clamav-daemon is running.
 clamd_socket = "/run/clamav/clamd.ctl"
 
-exec_workers = 4
-background_workers = 2
+# Threads for exec checks (only used with block_exec) and background scans.
+exec_workers = 2
+background_workers = 1

@@ -15,9 +15,9 @@ use crate::guard::{Guard, Notice, Trigger};
 use crate::persistence;
 use crate::store::{now, ScanRecord};
 
-/// On-demand scans look at bigger files than on-access does: nobody is
-/// waiting on an exec here.
-const ONDEMAND_MAX_SIZE: u64 = 512 * 1024 * 1024;
+/// On-demand scans look at bigger files than on-access does, but each file
+/// is read into memory, so not much bigger.
+const ONDEMAND_MAX_SIZE: u64 = 100 * 1024 * 1024;
 
 pub struct User {
     pub uid: u32,
@@ -135,7 +135,9 @@ impl Scanner {
         std::thread::Builder::new()
             .name(format!("scan-{}", &id[..8]))
             .spawn(move || {
-                unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+                // The user asked for this scan, so it keeps going under load,
+                // but it yields to everything else.
+                crate::fsutil::lower_priority(crate::fsutil::IoPriority::Low, 10);
                 let mut prog = Progress { files: 0, detections: 0, suspicious: 0, errors: 0 };
                 if persistence_home {
                     for f in persistence::check_home(&user.home, Some(&user.name)) {
@@ -230,6 +232,7 @@ impl Walker<'_> {
             Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {}
             Err(_) => self.prog.errors += 1,
         }
+        crate::fsutil::trim_buffer(&mut self.buf);
         if self.last.elapsed() >= Duration::from_millis(250) {
             self.last = Instant::now();
             guard.notify(Notice::ScanProgress {

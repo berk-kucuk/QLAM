@@ -135,6 +135,7 @@ impl Daemon {
                 "exec_overflow": r.stats.exec_overflow.load(Ordering::Relaxed),
                 "writes_scanned": r.stats.writes_scanned.load(Ordering::Relaxed),
                 "writes_dropped": r.stats.dropped.load(Ordering::Relaxed),
+                "writes_skipped": r.stats.writes_skipped.load(Ordering::Relaxed),
             })
         });
         let last_scan = store.scans(user, 1).into_iter().next();

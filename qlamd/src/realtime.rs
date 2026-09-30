@@ -113,6 +113,8 @@ pub struct Stats {
     /// Execs allowed unchecked because the exec queue was backed up.
     pub exec_overflow: AtomicU64,
     pub writes_scanned: AtomicU64,
+    /// Written files skipped as not runnable (see `worth_scanning`).
+    pub writes_skipped: AtomicU64,
     /// Written files not scanned because the write queue was full.
     pub dropped: AtomicU64,
 }
@@ -686,15 +688,50 @@ fn exec_worker(s: Arc<Shared>, rx: Receiver<Job>) {
         }
         let trigger = Trigger::Exec { pid: job.pid, blocked: deny };
         report(&s, job.fd.as_fd(), &job.path, result, trigger, &mut buf);
+        fsutil::trim_buffer(&mut buf);
     }
 }
 
+/// File name endings of scripts and packages that can run on Linux without
+/// an exec bit or a recognisable header.
+const RUNNABLE_EXTENSIONS: &[&str] = &[
+    "sh", "bash", "zsh", "ksh", "py", "pl", "php", "phtml", "rb", "lua", "jar", "desktop", "service",
+    "timer", "so", "appimage", "run", "bin", "deb", "rpm",
+];
+
+/// Whether a written file is worth a background scan. Qlam looks for things
+/// that can run on Linux — the hash list and feed rules only cover those —
+/// so images, videos, documents, caches and build artefacts that aren't
+/// executables are skipped without being read. Executed files, tiny files
+/// (cheap, and the EICAR test file is one) and anything with an exec bit,
+/// an ELF or #! header or a runnable extension are scanned.
+fn worth_scanning(file: &File, st_mode: u32, size: i64, path: &Path) -> bool {
+    if size <= 4096 || st_mode & 0o111 != 0 {
+        return true;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    if ext.is_some_and(|e| RUNNABLE_EXTENSIONS.contains(&e.as_str())) {
+        return true;
+    }
+    let mut head = [0u8; 4];
+    let n = unsafe { libc::pread(file.as_raw_fd(), head.as_mut_ptr().cast(), head.len(), 0) };
+    n == 4 && (head == *b"\x7fELF" || head.starts_with(b"#!"))
+}
+
 fn scan_worker(s: Arc<Shared>, rx: Receiver<ScanJob>) {
-    // Background scans shouldn't compete with the user's foreground work.
-    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+    // Background scans only use the disk when nobody else needs it, and the
+    // CPU at the lowest priority.
+    fsutil::lower_priority(fsutil::IoPriority::Idle, 19);
     let mut buf = Vec::new();
     for job in rx {
         let Some(file) = reopen(&job.path, &job.key) else { continue };
+        if !job.exec {
+            let Ok(st) = fsutil::fstat(file.as_fd()) else { continue };
+            if !worth_scanning(&file, st.st_mode, st.st_size, &job.path) {
+                s.stats.writes_skipped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        }
         let trigger = if job.exec {
             s.stats.exec_checked.fetch_add(1, Ordering::Relaxed);
             Trigger::Exec { pid: job.pid, blocked: false }
@@ -704,6 +741,7 @@ fn scan_worker(s: Arc<Shared>, rx: Receiver<ScanJob>) {
         };
         let result = s.verdict(file.as_fd(), &job.path, &mut buf);
         report(&s, file.as_fd(), &job.path, result, trigger, &mut buf);
+        fsutil::trim_buffer(&mut buf);
     }
 }
 
@@ -1096,6 +1134,32 @@ mod tests {
         assert!(!is_browser_shm(Path::new("/tmp/.org.chromium.Chromium.x")));
         assert!(!is_browser_shm(Path::new("/dev/shm/payload")));
         assert!(!is_browser_shm(Path::new("/dev/shm/.org.chromium")));
+    }
+
+    #[test]
+    fn only_runnable_files_are_worth_a_background_scan() {
+        let dir = std::env::temp_dir().join(format!("qlam-worth-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = vec![b'a'; 10_000];
+        let check = |name: &str, head: &[u8], mode: u32| {
+            let p = dir.join(name);
+            let mut data = head.to_vec();
+            data.extend_from_slice(&big);
+            std::fs::write(&p, &data).unwrap();
+            let f = File::open(&p).unwrap();
+            worth_scanning(&f, mode, data.len() as i64, &p)
+        };
+        assert!(check("prog", b"\x7fELF", 0o644));
+        assert!(check("script", b"#!/bin/sh\n", 0o644));
+        assert!(check("tool", b"data", 0o755));
+        assert!(check("install.SH", b"data", 0o644));
+        assert!(!check("photo.jpg", b"\xff\xd8\xff\xe0", 0o644));
+        assert!(!check("notes.md", b"# Notes", 0o644));
+        // Small files are always cheap enough.
+        let p = dir.join("eicar.com");
+        std::fs::write(&p, b"X5O!P").unwrap();
+        assert!(worth_scanning(&File::open(&p).unwrap(), 0o644, 5, &p));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
