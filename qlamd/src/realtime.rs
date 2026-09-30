@@ -101,7 +101,7 @@ fn exec_backlog_limit() -> usize {
     } else {
         1024
     };
-    (soft / 4).clamp(64, 4096)
+    (soft / 4).clamp(16, 4096)
 }
 
 // ── Verdict cache ────────────────────────────────────────────────────────
@@ -409,9 +409,52 @@ fn classify(e: &io::Error) -> OnError {
     }
 }
 
-/// Pause after a resource error: long enough for workers to close
-/// descriptors, short enough that queued execs barely notice.
-const BACKOFF: Duration = Duration::from_millis(50);
+/// Pause after a resource error when no reserve is left.
+///
+/// Deliberately short. Each read() that fails for lack of descriptors still
+/// consumes one queued event (a notification is dropped, a permission event
+/// denied). Execs queued behind those events have not been read yet, so the
+/// watchdog cannot see them: with 2000 queued writes, a 50 ms pause would
+/// hold such an exec for 100 s. Draining quickly means an exec may fail
+/// during descriptor exhaustion, but it never hangs.
+const BACKOFF: Duration = Duration::from_millis(2);
+
+/// Descriptors the reader keeps in reserve.
+const RESERVE_FDS: usize = 16;
+
+/// Spare descriptors (on /dev/null) held back for when the table is full.
+/// Releasing them lets the kernel hand over the next events normally instead
+/// of refusing them; the reader closes most event descriptors within the same
+/// batch, then takes the reserve back.
+struct Reserve {
+    fds: Vec<OwnedFd>,
+}
+
+impl Reserve {
+    fn new() -> Reserve {
+        let mut r = Reserve { fds: Vec::with_capacity(RESERVE_FDS) };
+        r.refill();
+        r
+    }
+
+    /// Top up; stops quietly when the table is full again.
+    fn refill(&mut self) {
+        while self.fds.len() < RESERVE_FDS {
+            let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                break;
+            }
+            self.fds.push(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+    }
+
+    /// Hand the spares back to the process. False if there were none.
+    fn release(&mut self) -> bool {
+        let had = !self.fds.is_empty();
+        self.fds.clear();
+        had
+    }
+}
 
 /// Logs at most once per interval, counting what it held back.
 struct Throttle {
@@ -450,6 +493,7 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
     let mut recent: HashMap<PathBuf, Instant> = HashMap::new();
     let mut throttle = Throttle::new(Duration::from_secs(10));
     let mut overflow = Throttle::new(Duration::from_secs(10));
+    let mut reserve = Reserve::new();
 
     loop {
         let mut fds = [
@@ -482,8 +526,14 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
                     }
                 }
                 OnError::Backoff => {
-                    throttle.warn(format_args!("fanotify read: {e}; pausing {BACKOFF:?}"));
-                    std::thread::sleep(BACKOFF);
+                    if reserve.release() {
+                        throttle.warn(format_args!("fanotify read: {e}; using reserved descriptors"));
+                    } else {
+                        throttle.warn(format_args!(
+                            "fanotify read: {e}; the kernel refuses events until descriptors are freed"
+                        ));
+                        std::thread::sleep(BACKOFF);
+                    }
                 }
                 OnError::Fatal => fatal(&format!("fanotify read: {e}")),
             }
@@ -566,6 +616,10 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
                     s.stats.dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
+        }
+        // This batch's descriptors are closed now; take the reserve back.
+        if reserve.fds.len() < RESERVE_FDS {
+            reserve.refill();
         }
     }
 }
@@ -770,6 +824,173 @@ fn mount_watcher(s: Arc<Shared>, scope: Scope, mask: u64, mut marked: HashSet<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supervise::testutil::{child_mode, run_child};
+    use std::process::Command;
+
+    fn set_nofile(n: u64) {
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        unsafe {
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim), 0);
+            lim.rlim_cur = n.min(lim.rlim_max);
+            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &lim), 0);
+        }
+    }
+
+    #[test]
+    fn reserve_frees_room_when_the_table_is_full() {
+        let code = run_child("realtime::tests::reserve_child", "reserve", &[], Duration::from_secs(20));
+        assert_eq!(code, Some(0));
+    }
+
+    /// Child half: lowers the limit, so it runs in a process of its own.
+    #[test]
+    fn reserve_child() {
+        if child_mode().as_deref() != Some("reserve") {
+            return;
+        }
+        set_nofile(48);
+        let mut reserve = Reserve::new();
+        assert_eq!(reserve.fds.len(), RESERVE_FDS);
+        let mut hog = Vec::new();
+        while let Ok(f) = File::open("/dev/null") {
+            hog.push(f);
+        }
+        assert!(File::open("/dev/null").is_err(), "table should be full");
+        assert!(reserve.release());
+        for _ in 0..RESERVE_FDS {
+            hog.push(File::open("/dev/null").expect("room freed by the reserve"));
+        }
+        assert!(!reserve.release(), "nothing left to release");
+        drop(hog.pop());
+        reserve.refill();
+        assert_eq!(reserve.fds.len(), 1, "refill takes what is free, no more");
+    }
+
+    /// The 2026-09-30 freeze, reproduced: a burst of writes under a tiny
+    /// descriptor limit, then a completely full descriptor table while
+    /// another process writes and runs programs. Execs must keep being
+    /// answered within the deadline and the reader must survive.
+    ///
+    /// Needs root (fanotify permission events), and it marks "/", so every
+    /// exec on the machine goes through the test while it runs; the child
+    /// kills itself after 90 s whatever happens. Run it with:
+    ///
+    ///   sudo -E cargo test --release -- --ignored survives_descriptor_exhaustion
+    #[test]
+    #[ignore = "needs root; marks / with fanotify"]
+    fn survives_descriptor_exhaustion() {
+        assert_eq!(unsafe { libc::geteuid() }, 0, "run as root, see the comment above");
+        let code = run_child("realtime::tests::stress_child", "stress", &["--ignored"], Duration::from_secs(120));
+        assert_eq!(code, Some(0), "stress child failed or hung");
+    }
+
+    #[test]
+    #[ignore = "child half of survives_descriptor_exhaustion"]
+    fn stress_child() {
+        if child_mode().as_deref() != Some("stress") {
+            return;
+        }
+        // Kill switch: whatever happens, this process — and the fanotify
+        // descriptor "/" is marked with — is gone within 90 s.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(90));
+            eprintln!("stress test timed out");
+            unsafe { libc::_exit(3) }
+        });
+
+        let dir = PathBuf::from(format!("/tmp/qlam-stress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Bundled rules only: quick to load, and nothing here should match.
+        std::env::set_var("QLAM_FEEDS_DIR", dir.join("no-feeds"));
+        let prog = dir.join("true");
+        std::fs::copy("/bin/true", &prog).unwrap();
+
+        let cfg = Config {
+            scope: vec![dir.to_string_lossy().into_owned()],
+            exec_workers: 2,
+            background_workers: 1,
+            ..Config::default()
+        };
+        let store = Arc::new(crate::store::Store::in_memory());
+        let (tx, _rx) = crossbeam_channel::bounded(16);
+        let engine = crate::engine::Engine::new("/nonexistent/clamd.ctl", store.clone());
+        let guard = Arc::new(Guard::new(engine, store, tx, false));
+
+        set_nofile(64);
+        let rt = Realtime::start(&cfg, guard).expect("start real-time protection");
+        let stats = rt.stats.clone();
+        let emfile = |e: &io::Error| e.raw_os_error() == Some(libc::EMFILE);
+
+        // Phase 1: thousands of writes in this process under the limit of
+        // 64, while programs inside and outside the watched directory run.
+        let writer = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                for i in 0..3000 {
+                    let p = dir.join(format!("a{i}"));
+                    loop {
+                        match std::fs::write(&p, b"x") {
+                            Ok(()) => break,
+                            Err(e) if emfile(&e) => std::thread::sleep(Duration::from_millis(1)),
+                            Err(e) => panic!("write {}: {e}", p.display()),
+                        }
+                    }
+                }
+            })
+        };
+        let mut runs = 0;
+        while !writer.is_finished() || runs < 10 {
+            for p in [Path::new("/bin/true"), prog.as_path()] {
+                let t = Instant::now();
+                match Command::new(p).status() {
+                    Ok(_) => {
+                        assert!(t.elapsed() < EXEC_DEADLINE, "exec of {} took {:?}", p.display(), t.elapsed());
+                        runs += 1;
+                    }
+                    // Our own table was full for a moment; not the exec's fault.
+                    Err(e) if emfile(&e) => {}
+                    Err(e) => panic!("exec {}: {e}", p.display()),
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        writer.join().unwrap();
+
+        // Phase 2: this process has no free descriptor at all while another
+        // process writes 2000 watched files and runs programs. Its finishing
+        // proves every exec was answered (allowed, or denied while no
+        // descriptor could be made for it) instead of left waiting.
+        std::fs::write(dir.join("go.tmp"), b"").unwrap();
+        let script = "while [ ! -e go ]; do :; done; i=0; while [ $i -lt 2000 ]; do : > b$i; \
+                      if [ $((i % 200)) -eq 0 ]; then /bin/true; ./true; fi; i=$((i+1)); done";
+        let mut child = Command::new("/bin/sh").args(["-c", script]).current_dir(&dir).spawn().unwrap();
+        let mut hog = Vec::new();
+        while let Ok(f) = File::open("/dev/null") {
+            hog.push(f);
+        }
+        std::fs::rename(dir.join("go.tmp"), dir.join("go")).unwrap(); // needs no descriptor
+        let start = Instant::now();
+        let status = loop {
+            if let Some(st) = child.try_wait().unwrap() {
+                break st;
+            }
+            assert!(start.elapsed() < Duration::from_secs(40), "writer process stuck: execs not answered");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "writer process: {status}");
+        drop(hog);
+
+        // Phase 3: the reader is still there and checking in-scope execs.
+        let before = stats.exec_checked.load(Ordering::Relaxed);
+        let t = Instant::now();
+        assert!(Command::new(&prog).status().unwrap().success());
+        assert!(t.elapsed() < EXEC_DEADLINE, "exec took {:?}", t.elapsed());
+        assert!(stats.exec_checked.load(Ordering::Relaxed) > before, "exec not checked: reader gone?");
+
+        rt.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn read_errors_never_stop_the_reader_by_accident() {

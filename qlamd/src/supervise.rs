@@ -75,21 +75,27 @@ pub fn spawn_critical(
         .expect("spawn thread")
 }
 
+/// Helpers for tests that must run in a process of their own: anything that
+/// ends the process on purpose, or changes process-wide limits.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub mod testutil {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    /// Environment variable that turns a test into the child half of a
-    /// process-level test.
-    const CHILD: &str = "QLAM_SUPERVISE_CHILD";
+    const CHILD: &str = "QLAM_TEST_CHILD";
 
-    /// Re-run this test binary for one test, with `mode` in the environment,
-    /// and return its exit code (None if it had to be killed).
-    fn run_child(test: &str, mode: &str) -> Option<i32> {
+    /// In a child started by [`run_child`], the mode it was given.
+    pub fn child_mode() -> Option<String> {
+        std::env::var(CHILD).ok()
+    }
+
+    /// Re-run this test binary for one test (`extra` is passed to the test
+    /// harness, e.g. `--ignored`) with `mode` in the environment. Returns the
+    /// exit code, or None if the child had to be killed after `timeout`.
+    pub fn run_child(test: &str, mode: &str, extra: &[&str], timeout: Duration) -> Option<i32> {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .args(extra)
             .env(CHILD, mode)
             .spawn()
             .unwrap();
@@ -98,19 +104,32 @@ mod tests {
             if let Some(status) = child.try_wait().unwrap() {
                 return status.code();
             }
-            if start.elapsed() > Duration::from_secs(20) {
+            if start.elapsed() > timeout {
                 let _ = child.kill();
                 return None;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::{child_mode, run_child};
+    use super::*;
+    use std::time::Duration;
+
+    const CHILD_TEST: &str = "supervise::tests::critical_child";
+
+    fn run(mode: &str) -> Option<i32> {
+        run_child(CHILD_TEST, mode, &[], Duration::from_secs(20))
+    }
 
     /// Child side: start a critical thread that dies in the requested way,
     /// then outlive it. Reaching the end means the process was not ended.
     #[test]
     fn critical_child() {
-        let Ok(mode) = std::env::var(CHILD) else { return };
+        let Some(mode) = child_mode() else { return };
         let stopping = Arc::new(AtomicBool::new(mode == "stopping"));
         let t = spawn_critical("reader", stopping, move || {
             if mode == "panic" {
@@ -121,20 +140,18 @@ mod tests {
         std::thread::sleep(Duration::from_secs(2));
     }
 
-    const CHILD_TEST: &str = "supervise::tests::critical_child";
-
     #[test]
     fn process_exits_when_critical_thread_returns() {
-        assert_eq!(run_child(CHILD_TEST, "return"), Some(FATAL_EXIT));
+        assert_eq!(run("return"), Some(FATAL_EXIT));
     }
 
     #[test]
     fn process_exits_when_critical_thread_panics() {
-        assert_eq!(run_child(CHILD_TEST, "panic"), Some(FATAL_EXIT));
+        assert_eq!(run("panic"), Some(FATAL_EXIT));
     }
 
     #[test]
     fn orderly_stop_is_not_fatal() {
-        assert_eq!(run_child(CHILD_TEST, "stopping"), Some(0));
+        assert_eq!(run("stopping"), Some(0));
     }
 }
