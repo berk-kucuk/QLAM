@@ -117,7 +117,9 @@ impl Daemon {
             json!({
                 "exec_checked": r.stats.exec_checked.load(Ordering::Relaxed),
                 "exec_blocked": r.stats.exec_blocked.load(Ordering::Relaxed),
+                "exec_overflow": r.stats.exec_overflow.load(Ordering::Relaxed),
                 "writes_scanned": r.stats.writes_scanned.load(Ordering::Relaxed),
+                "writes_dropped": r.stats.dropped.load(Ordering::Relaxed),
             })
         });
         let last_scan = store.scans(user, 1).into_iter().next();

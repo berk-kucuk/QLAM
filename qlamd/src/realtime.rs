@@ -61,8 +61,25 @@ const EXEC_DEADLINE: Duration = Duration::from_secs(3);
 pub struct Stats {
     pub exec_checked: AtomicU64,
     pub exec_blocked: AtomicU64,
+    /// Execs allowed unchecked because the exec queue was backed up.
+    pub exec_overflow: AtomicU64,
     pub writes_scanned: AtomicU64,
+    /// Written files not scanned because the write queue was full.
     pub dropped: AtomicU64,
+}
+
+/// How many exec checks may wait in the queue, each holding a descriptor.
+/// Past this, new execs are allowed without a check: the descriptors must
+/// never run out (the kernel then denies execs outright), and a backlog this
+/// deep means the checks couldn't keep up anyway.
+fn exec_backlog_limit() -> usize {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let soft = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 {
+        lim.rlim_cur as usize
+    } else {
+        1024
+    };
+    (soft / 4).clamp(64, 4096)
 }
 
 // ── Verdict cache ────────────────────────────────────────────────────────
@@ -173,6 +190,8 @@ struct Shared {
     pending: Pending,
     max_size: u64,
     block_exec: bool,
+    /// See [`exec_backlog_limit`].
+    max_exec_backlog: usize,
 }
 
 impl Shared {
@@ -278,6 +297,7 @@ impl Realtime {
             pending: Pending::default(),
             max_size: cfg.max_file_size(),
             block_exec: cfg.block_exec,
+            max_exec_backlog: exec_backlog_limit(),
         });
 
         let (exec_tx, exec_rx) = unbounded::<Job>();
@@ -407,6 +427,7 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
     let mut buf = vec![0u8; 256 * 1024];
     let mut recent: HashMap<PathBuf, Instant> = HashMap::new();
     let mut throttle = Throttle::new(Duration::from_secs(10));
+    let mut overflow = Throttle::new(Duration::from_secs(10));
 
     loop {
         let mut fds = [
@@ -485,8 +506,17 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
             };
 
             if is_perm {
-                // Unbounded on purpose: blocking here would stall every exec
-                // on the machine, not just the ones in scope.
+                // The queue is unbounded because blocking here would stall
+                // every exec on the machine; its depth is capped here instead.
+                if exec_tx.len() >= s.max_exec_backlog {
+                    s.respond(fd.as_raw_fd(), true);
+                    s.stats.exec_overflow.fetch_add(1, Ordering::Relaxed);
+                    overflow.warn(format_args!(
+                        "{} exec checks queued; allowing new execs unchecked until it drains",
+                        s.max_exec_backlog
+                    ));
+                    continue;
+                }
                 let ticket = s.register(fd.as_raw_fd());
                 if let Err(e) = exec_tx.send(Job { fd, pid: m.pid, path, ticket }) {
                     s.answer(e.0.ticket, true);
