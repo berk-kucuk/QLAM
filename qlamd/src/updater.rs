@@ -7,7 +7,8 @@
 //!
 //! Feeds:
 //!   - MalwareBazaar (abuse.ch, CC0): SHA-256 of malware samples. Only
-//!     samples attributed to a named family are imported (see hashdb.rs).
+//!     samples of Linux file types attributed to a named family are
+//!     imported (see hashdb.rs).
 //!     A full export on first run and monthly, the 48-hour export daily.
 //!   - YARA Forge core, reduced to rules for Linux executables (see
 //!     `select_feed_rules`); rules that yara-x can't compile are dropped
@@ -33,6 +34,17 @@ const UA: &str = concat!("qlam/", env!("CARGO_PKG_VERSION"), " (+https://github.
 const MB_FULL_URL: &str = "https://bazaar.abuse.ch/export/csv/full/";
 const MB_RECENT_URL: &str = "https://bazaar.abuse.ch/export/csv/recent/";
 const MB_FULL_EVERY: i64 = 30 * 24 * 3600;
+
+/// MalwareBazaar file types that can run on Linux. Windows executables,
+/// WSH scripts and Office documents are most of the feed but can't harm this
+/// system; leaving them out cuts the list (and its memory) by about 80%.
+const LINUX_TYPES: &[&str] = &["elf", "sh", "bash", "zsh", "ksh", "py", "pl", "php", "jar", "deb", "rpm"];
+
+/// Bumped whenever the selection above changes, forcing a full re-import.
+const MB_FILTER_VERSION: u32 = 2;
+
+/// Bumped whenever `select_feed_rules` changes, forcing a re-download.
+const FORGE_FILTER_VERSION: u32 = 2;
 const MB_FILE: &str = "malwarebazaar.qlh";
 
 const FORGE_API: &str = "https://api.github.com/repos/YARAHQ/yara-forge/releases/latest";
@@ -48,9 +60,13 @@ pub struct FeedState {
     pub malwarebazaar_full_at: i64,
     pub malwarebazaar_at: i64,
     pub malwarebazaar_hashes: usize,
+    /// MB_FILTER_VERSION the current list was built with.
+    pub malwarebazaar_filter: u32,
     pub yara_forge_tag: String,
     pub yara_forge_rules: usize,
     pub yara_forge_dropped: usize,
+    /// FORGE_FILTER_VERSION the current rule file was built with.
+    pub yara_forge_filter: u32,
     pub errors: Vec<String>,
 }
 
@@ -113,7 +129,9 @@ fn update_malwarebazaar(dir: &Path, state: &mut FeedState) -> io::Result<()> {
     let target = dir.join(MB_FILE);
     let mut builder = Builder::default();
 
-    let full = !target.exists() || now() - state.malwarebazaar_full_at > MB_FULL_EVERY;
+    let full = !target.exists()
+        || state.malwarebazaar_filter != MB_FILTER_VERSION
+        || now() - state.malwarebazaar_full_at > MB_FULL_EVERY;
     if full {
         log::info!("MalwareBazaar: downloading full export");
         let tmp = dir.join(".malwarebazaar-full.zip.part");
@@ -129,6 +147,7 @@ fn update_malwarebazaar(dir: &Path, state: &mut FeedState) -> io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         res?;
         state.malwarebazaar_full_at = now();
+        state.malwarebazaar_filter = MB_FILTER_VERSION;
     } else {
         builder.read_file(&target)?;
         let before = builder.len();
@@ -151,7 +170,8 @@ fn update_malwarebazaar(dir: &Path, state: &mut FeedState) -> io::Result<()> {
 }
 
 /// `"first_seen","sha256","md5","sha1","reporter","file_name","file_type",
-/// "mime","signature",...` — only rows with a family signature are kept.
+/// "mime","signature",...` — only rows of a Linux file type (LINUX_TYPES)
+/// with a family signature are kept.
 fn parse_mb_csv(reader: impl BufRead, builder: &mut Builder) -> io::Result<()> {
     for line in reader.lines() {
         let line = line?;
@@ -159,7 +179,10 @@ fn parse_mb_csv(reader: impl BufRead, builder: &mut Builder) -> io::Result<()> {
             continue;
         }
         let fields: Vec<&str> = line.split("\",").map(|f| f.trim().trim_matches('"').trim()).collect();
-        let (Some(sha), Some(sig)) = (fields.get(1), fields.get(8)) else { continue };
+        let (Some(sha), Some(ftype), Some(sig)) = (fields.get(1), fields.get(6), fields.get(8)) else { continue };
+        if !LINUX_TYPES.contains(&ftype.to_ascii_lowercase().as_str()) {
+            continue;
+        }
         if sig.is_empty() || sig.eq_ignore_ascii_case("n/a") || sig.len() > 64 {
             continue;
         }
@@ -190,7 +213,7 @@ fn update_yara_forge(dir: &Path, state: &mut FeedState) -> io::Result<()> {
     let target = dir.join(FORGE_FILE);
     let body = get(&agent, FORGE_API, 1024 * 1024)?;
     let release: Release = serde_json::from_slice(&body).map_err(io::Error::other)?;
-    if release.tag_name == state.yara_forge_tag && target.exists() {
+    if release.tag_name == state.yara_forge_tag && state.yara_forge_filter == FORGE_FILTER_VERSION && target.exists() {
         log::info!("YARA Forge: {} is current", release.tag_name);
         return Ok(());
     }
@@ -227,6 +250,7 @@ fn update_yara_forge(dir: &Path, state: &mut FeedState) -> io::Result<()> {
     state.yara_forge_tag = release.tag_name;
     state.yara_forge_rules = kept;
     state.yara_forge_dropped = dropped;
+    state.yara_forge_filter = FORGE_FILTER_VERSION;
     log::info!("YARA Forge: {kept} rules kept, {dropped} not for Linux executables or incompatible");
     Ok(())
 }
@@ -288,17 +312,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn csv_keeps_only_attributed() {
+    fn csv_keeps_attributed_linux_samples() {
         let csv = concat!(
             "# comment\n",
+            // Attributed, but a Windows executable: can't run here.
+            "\"2026-09-29 19:30:00\", \"e34d9ea96e37934b805bdd0a8821411555409a7e16f43b109d5d14de7adb1d8b\", \"m\", \"s\", \"anon\", \"inv.exe\", \"exe\", \"application/x-dosexec\", \"AgentTesla\", \"n/a\", \"n/a\", \"n/a\", \"x\", \"y\"\n",
+            // Attributed shell script.
+            "\"2026-09-29 19:31:00\", \"f34d9ea96e37934b805bdd0a8821411555409a7e16f43b109d5d14de7adb1d8b\", \"m\", \"s\", \"anon\", \"x.sh\", \"sh\", \"text/x-shellscript\", \"Mirai\", \"n/a\", \"n/a\", \"n/a\", \"x\", \"y\"\n",
             "\"2026-09-29 19:33:37\", \"c34d9ea96e37934b805bdd0a8821411555409a7e16f43b109d5d14de7adb1d8b\", \"m\", \"s\", \"abuse_ch\", \"bot.mips\", \"elf\", \"application/x-executable\", \"Mirai\", \"n/a\", \"n/a\", \"n/a\", \"x\", \"y\"\n",
             "\"2026-09-29 19:33:37\", \"d34d9ea96e37934b805bdd0a8821411555409a7e16f43b109d5d14de7adb1d8b\", \"m\", \"s\", \"anon\", \"setup.exe\", \"exe\", \"application/x-dosexec\", \"n/a\", \"n/a\", \"n/a\", \"n/a\", \"x\", \"y\"\n",
         );
         let mut b = Builder::default();
         parse_mb_csv(BufReader::new(csv.as_bytes()), &mut b).unwrap();
         let db = b.build();
-        assert_eq!(db.len(), 1);
+        assert_eq!(db.len(), 2);
         assert_eq!(db.lookup_hex("c34d9ea96e37934b805bdd0a8821411555409a7e16f43b109d5d14de7adb1d8b"), Some("Mirai"));
+        assert_eq!(db.lookup_hex("f34d9ea96e37934b805bdd0a8821411555409a7e16f43b109d5d14de7adb1d8b"), Some("Mirai"));
+        assert_eq!(db.lookup_hex("e34d9ea96e37934b805bdd0a8821411555409a7e16f43b109d5d14de7adb1d8b"), None);
     }
 
     #[test]
