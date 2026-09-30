@@ -8,31 +8,12 @@ behaviour native and works on both Wayland and X11.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import qtawesome as qta
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPixmap
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
+from ui.brand import mark_pixmap
 from ui.theme import theme
-
-_LOGOS = Path(__file__).resolve().parent.parent / "Logos"
-
-
-def tinted_logo(size: int, color: str) -> QPixmap:
-    """The logo is a single-colour mark: paint it in `color`."""
-    path = _LOGOS / "qlam_transparent.png"
-    if not path.exists():
-        return QPixmap()
-    pm = QPixmap(str(path)).scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
-                                   Qt.TransformationMode.SmoothTransformation)
-    painter = QPainter(pm)
-    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-    painter.fillRect(pm.rect(), QColor(color))
-    painter.end()
-    return pm
-
 
 class TitleBar(QWidget):
     theme_toggled = pyqtSignal()
@@ -97,7 +78,7 @@ class TitleBar(QWidget):
 
     def retint(self):
         p = theme.p
-        self.logo.setPixmap(tinted_logo(22, p["text"]))
+        self.logo.setPixmap(mark_pixmap(22, ring=p["text"], small=False))
         icon = "fa5s.sun" if theme.name == "dark" else "fa5s.moon"
         self.theme_btn.setIcon(qta.icon(icon, color=p["text_mid"]))
         self.theme_btn.setIconSize(QSize(14, 14))

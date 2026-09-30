@@ -132,7 +132,7 @@ LAUNCHER
 
 # ── Desktop entry + icon ───────────────────────────────────────
 create_desktop() {
-    local logo="$INSTALL_DIR/Logos/qlam.png"
+    local logo="$INSTALL_DIR/Logos/qlam-256.png"
     if [ -f "$logo" ]; then
         mkdir -p "$ICON_DIR" "$HOME/.local/share/pixmaps"
         cp "$logo" "$ICON_DIR/qlam.png"

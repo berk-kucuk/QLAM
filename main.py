@@ -12,13 +12,12 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtClassInfo, pyqtSlot
 from PyQt6.QtDBus import QDBusConnection, QDBusInterface
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from ui.theme import get_stylesheet, theme
 
 BASE_DIR = Path(__file__).resolve().parent
-LOGOS_DIR = BASE_DIR / "Logos"
 RESOURCES_DIR = BASE_DIR / "resources"
 
 _GUI_SERVICE = "org.maze.QlamGui"
@@ -67,9 +66,8 @@ def main():
             QDBusInterface(_GUI_SERVICE, "/", _GUI_SERVICE, bus).call("Show")
         return 0
 
-    logo = LOGOS_DIR / "qlam.png"
-    if logo.exists():
-        app.setWindowIcon(QIcon(str(logo)))
+    from ui import brand
+    app.setWindowIcon(brand.app_icon())
     font = QFont("Inter", 10)
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)

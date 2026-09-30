@@ -1,16 +1,14 @@
 """Main window, tray icon and notifications."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import qtawesome as qta
 from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
-from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
     QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
+from ui import brand
 from ui.alerts_page import AlertsPage, is_open
 from ui.client import QlamClient
 from ui.notifier import Notifier
@@ -22,7 +20,6 @@ from ui.theme import load_prefs, save_theme, theme
 from ui.titlebar import ResizeGrips, TitleBar
 from ui.widgets import headline, level, short_path
 
-_LOGOS = Path(__file__).resolve().parent.parent / "Logos"
 
 _NAV = [
     ("overview", "fa5s.shield-alt", "Overview"),
@@ -309,10 +306,11 @@ class MainWindow(QMainWindow):
 
     def _setup_tray(self):
         self.tray = None
+        self._tray_state = ""
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self._app_icon())
+        self.tray.setIcon(brand.tray_icon("offline"))
         self.tray.setToolTip("Qlam")
         menu = QMenu()
         menu.addAction("Open Qlam", self.show_window)
@@ -324,28 +322,25 @@ class MainWindow(QMainWindow):
             lambda r: self.show_window() if r == QSystemTrayIcon.ActivationReason.Trigger else None)
         self.tray.show()
 
-    def _app_icon(self) -> QIcon:
-        p = _LOGOS / "qlam.png"
-        return QIcon(str(p)) if p.exists() else qta.icon("fa5s.shield-alt")
 
     def _update_tray(self, st: dict, ok: bool):
         if not self.tray:
             return
         open_n = int(st.get("user", {}).get("open_findings", 0)) if ok else 0
         rt_on = ok and st.get("realtime", {}).get("active")
+        # The tray mark's tail carries the state.
         if not ok:
-            tip = "Qlam: service not running"
+            tip, state = "Qlam: service not running", "offline"
         elif open_n:
-            tip = f"Qlam: {open_n} finding(s) to review"
+            tip, state = f"Qlam: {open_n} finding(s) to review", "alert"
         elif rt_on:
-            tip = "Qlam: protected"
+            tip, state = "Qlam: protected", "protected"
         else:
-            tip = "Qlam: real-time protection off"
+            tip, state = "Qlam: real-time protection off", "off"
         self.tray.setToolTip(tip)
-        if open_n:
-            self.tray.setIcon(qta.icon("fa5s.exclamation-triangle", color=theme.p["bad"]))
-        else:
-            self.tray.setIcon(self._app_icon())
+        if state != self._tray_state:
+            self._tray_state = state
+            self.tray.setIcon(brand.tray_icon(state))
 
     def closeEvent(self, event):
         # With a tray the app keeps running to show warnings; protection

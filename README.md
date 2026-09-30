@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Logos/qlam_transparent_hortizental.png" alt="Qlam" width="280"/>
+<img src="Logos/qlam-wordmark.png" alt="Qlam" width="420"/>
 
 <br/>
 

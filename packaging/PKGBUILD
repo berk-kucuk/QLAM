@@ -107,8 +107,13 @@ NoDisplay=true
 X-GNOME-Autostart-Delay=5
 EOS
 
-    install -Dm644 Logos/qlam.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/qlam.png"
-    install -Dm644 Logos/qlam.png "$pkgdir/usr/share/pixmaps/qlam.png"
+    # App icon at every hicolor size, plus the scalable original.
+    local size
+    for size in 16 22 24 32 48 64 128 256 512; do
+        install -Dm644 "Logos/qlam-$size.png" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/qlam.png"
+    done
+    install -Dm644 Logos/qlam.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/qlam.svg"
+    install -Dm644 Logos/qlam-256.png "$pkgdir/usr/share/pixmaps/qlam.png"
     if [ -f LICENSE ]; then
         install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     fi
