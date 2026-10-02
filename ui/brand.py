@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
 LOGOS = Path(__file__).resolve().parent.parent / "Logos"
@@ -78,8 +78,11 @@ def tray_icon(state: str) -> QIcon:
     return icon
 
 
-# Share of the tile the mark takes; the rest is black margin.
-_TILE_MARK = 0.66
+# Share of the tile the mark's square takes (its SVG carries 4% padding per
+# side, so the mark itself spans ~63%, as in the app icon); the rest is black.
+_TILE_MARK = 0.68
+# Corner radius as a share of the tile: 224 on the 1024 Maze family grid.
+_TILE_RADIUS = 224 / 1024
 
 
 def _tile(size: int, tail: tuple[str, str]) -> QPixmap:
@@ -90,12 +93,12 @@ def _tile(size: int, tail: tuple[str, str]) -> QPixmap:
     out.fill(Qt.GlobalColor.transparent)
     p = QPainter(out)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    # Black tile with a faint edge, so it keeps its shape on a black panel.
-    edge = max(1.0, px / 32)
-    r = px * 0.24
-    p.setPen(QPen(QColor("#2A2A2A"), edge))
+    # The full-size black tile of the app icon, edge to edge like Maze AI's
+    # and Maze Connect's, so the three tray icons come out the same size.
+    r = px * _TILE_RADIUS
+    p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QColor("#000000"))
-    p.drawRoundedRect(QRectF(edge / 2, edge / 2, px - edge, px - edge), r, r)
+    p.drawRoundedRect(QRectF(0, 0, px, px), r, r)
     inner = round(px * _TILE_MARK)
     mark = mark_pixmap(inner, _RING, tail, small=size <= 32)
     mark.setDevicePixelRatio(1.0)  # drawn in device pixels here

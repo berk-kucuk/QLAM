@@ -33,6 +33,7 @@ RING = "#F2F2F2"
 TAIL_LIGHT, TAIL_DARK = "#9BFFDC", "#14D48B"
 GLOW = "#2BF5A4"
 BLACK = "#000000"
+TILE_RX = 224                                 # of 1024: the Maze family tile corner
 
 
 def f(x: float) -> str:
@@ -175,11 +176,12 @@ def placed(size: float, box: tuple[float, float, float], small: bool = False, gl
 
 
 def app_icon() -> str:
-    # The mark takes ~60% of the tile, centred.
-    inner = 1024 * 0.60
+    # The Maze family icon grid, shared with Maze AI and Maze Connect: the
+    # tile fills the 1024 canvas with corner radius 224, and the mark spans
+    # ~63% of it, centred, so the three sit at the same size side by side.
+    inner = 1024 * 0.63
     body = (f'{defs(glow=True)}\n'
-            f'  <rect x="32" y="32" width="960" height="960" rx="224" fill="{BLACK}"/>\n'
-            f'  <rect x="34" y="34" width="956" height="956" rx="222" fill="none" stroke="#1E1E1E" stroke-width="4"/>\n'
+            f'  <rect width="1024" height="1024" rx="{TILE_RX}" fill="{BLACK}"/>\n'
             f'  {placed(1024, ((1024 - inner) / 2, (1024 - inner) / 2, inner), glow=True)}')
     return svg(body, 1024, 1024)
 
