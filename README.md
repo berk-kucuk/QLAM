@@ -6,6 +6,8 @@
 
 **A warn-first antivirus for the Linux desktop**
 
+*Developed for [Maze Linux](https://github.com/berk-kucuk/MazeLinux)*
+
 [![Rust](https://img.shields.io/badge/daemon-Rust-orange?style=flat-square&logo=rust)](qlamd)
 [![PyQt6](https://img.shields.io/badge/app-PyQt6-green?style=flat-square)](ui)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](#license)
@@ -257,4 +259,6 @@ Qlam/
 
 ## License
 
-MIT.
+Copyright © 2026 Berk Küçük
+
+Released under the MIT License — see [LICENSE](LICENSE).

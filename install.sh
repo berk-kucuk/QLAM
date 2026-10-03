@@ -145,7 +145,7 @@ create_desktop() {
 [Desktop Entry]
 Name=Qlam
 GenericName=Antivirus
-Comment=ClamAV-powered antivirus
+Comment=ClamAV-powered antivirus — for Maze Linux
 Exec=$BIN_DIR/qlam
 Icon=qlam
 Terminal=false

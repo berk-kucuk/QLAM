@@ -38,6 +38,7 @@ class TitleBar(QWidget):
         name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         lay.addWidget(self.logo)
         lay.addWidget(name)
+        lay.addWidget(maze_linux_tag("for Maze Linux"))
         lay.addStretch(1)
 
         self.pill = QLabel()
@@ -185,3 +186,18 @@ class ResizeGrips:
             grip.setGeometry(*rects[grip.edges])
             grip.setVisible(visible)
             grip.raise_()
+
+
+def maze_linux_tag(text: str, size_px: int = 10):
+    """The small "for Maze Linux" line beside the app name. It takes the
+    surrounding text colour and fades it, so it reads right in every theme."""
+    from PyQt6.QtWidgets import QGraphicsOpacityEffect, QLabel
+    from PyQt6.QtCore import Qt
+    tag = QLabel(text)
+    tag.setObjectName("mazeLinuxTag")
+    tag.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    tag.setStyleSheet(f"font-size: {size_px}px; background: transparent;")
+    fade = QGraphicsOpacityEffect(tag)
+    fade.setOpacity(0.55)
+    tag.setGraphicsEffect(fade)
+    return tag

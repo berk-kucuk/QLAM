@@ -1,9 +1,9 @@
 # Maintainer: Berk Küçük <berkkucukk@proton.me>
 
 pkgname=qlam
-pkgver=2.0.1
+pkgver=2.0.2
 pkgrel=1
-pkgdesc="Warn-first antivirus for Linux: on-access protection for user files, with a desktop app"
+pkgdesc="Warn-first antivirus for Linux: on-access protection for user files, with a desktop app — for Maze Linux"
 arch=('x86_64')
 url="https://github.com/berk-kucuk/QLAM"
 license=('MIT')
@@ -82,7 +82,7 @@ EOS
 [Desktop Entry]
 Name=Qlam
 GenericName=Antivirus
-Comment=See and manage what Qlam's protection found
+Comment=See and manage what Qlam's protection found — for Maze Linux
 Exec=qlam
 Icon=qlam
 Terminal=false
