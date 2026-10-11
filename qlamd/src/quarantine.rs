@@ -190,7 +190,7 @@ fn unlink_if_same(path: &Path, st: &libc::stat) -> io::Result<()> {
 ///
 /// The stored copy is verified in full before a single byte is written, so a
 /// damaged quarantine file never ends up in the user's folder.
-pub fn restore(store: &Store, item: &QuarantineItem, out: OwnedFd) -> io::Result<()> {
+pub fn restore(store: &Store, item: &QuarantineItem, out: OwnedFd, caller: u32) -> io::Result<()> {
     let (mut src, key) = open_sample(item)?;
     let mut hasher = Sha256::new();
     decode(&mut src, &key, |chunk| {
@@ -204,7 +204,10 @@ pub fn restore(store: &Store, item: &QuarantineItem, out: OwnedFd) -> io::Result
     let mut out = File::from(out);
     decode(&mut src, &key, |chunk| out.write_all(chunk))?;
     out.sync_all()?;
-    store.allowlist_add(&item.sha256, &format!("restored from quarantine: {}", item.original_path));
+    // Scoped like a trust decision: restoring one's own file must not
+    // switch detection of this content off for every account.
+    store.allowlist_add(&Store::user_key(caller, &item.sha256),
+                        &format!("restored from quarantine by uid {caller}: {}", item.original_path));
     delete(store, item)
 }
 
@@ -296,8 +299,12 @@ mod tests {
         let raw = std::fs::read(store_path(&item.id)).unwrap();
         assert!(!raw.windows(64).any(|w| w == &data[..64]), "stored encoded, not as-is");
         let out = home.join("restored.bin");
-        restore(&store, &item, File::create(&out).unwrap().into()).unwrap();
+        restore(&store, &item, File::create(&out).unwrap().into(), 1000).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), data);
+        // A non-root restore allowlists the content for that user only.
+        assert!(!store.is_allowlisted(&item.sha256), "restore must not allowlist system-wide");
+        assert!(store.is_allowlisted_for(Some(1000), &item.sha256));
+        assert!(!store.is_allowlisted_for(Some(1001), &item.sha256));
         assert_eq!(stored_samples(), 0);
         assert!(store.quarantine_list(None).is_empty());
 

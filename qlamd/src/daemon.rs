@@ -264,6 +264,8 @@ pub fn home_owner(path: &Path) -> Option<u32> {
     let home: PathBuf = match top {
         "root" => PathBuf::from("/root"),
         "home" => Path::new("/home").join(comps.next()?.as_os_str()),
+        // Each user's runtime directory is as private as their home.
+        "run" if comps.next()?.as_os_str() == "user" => Path::new("/run/user").join(comps.next()?.as_os_str()),
         _ => return None,
     };
     std::fs::metadata(home).ok().map(|m| m.uid())

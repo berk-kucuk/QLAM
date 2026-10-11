@@ -17,7 +17,7 @@ pub mod hashdb;
 pub mod yara;
 
 use std::io;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -133,8 +133,13 @@ impl Engine {
         crate::fsutil::read_from_start(fd, buf, max_size)?;
         let sha256 = hex::encode(Sha256::digest(&buf[..]));
 
-        // The user said "I trust this file": nothing overrides that.
-        if self.store.is_allowlisted(&sha256) {
+        // The user said "I trust this file": nothing overrides that. A
+        // per-user decision only covers files that user owns.
+        let owner = {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            (unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0).then_some(st.st_uid)
+        };
+        if self.store.is_allowlisted_for(owner, &sha256) {
             return Ok(Verdict::clean(sha256));
         }
 

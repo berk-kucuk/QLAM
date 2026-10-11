@@ -222,7 +222,7 @@ impl Guard {
     /// said to trust it.
     pub fn report_finding(&self, path: &Path, uid: u32, name: &str, detail: &str) -> Option<Event> {
         let path_s = path.to_string_lossy().into_owned();
-        if self.store.is_allowlisted(&finding_key(&path_s, name)) {
+        if self.store.is_allowlisted_for(Some(uid), &finding_key(&path_s, name)) {
             return None;
         }
         let mut ev = Event {
@@ -278,10 +278,13 @@ impl Guard {
 
     /// "I trust this": never flag this content (or this persistence entry)
     /// again.
-    pub fn trust_event(&self, ev: &Event) {
+    pub fn trust_event(&self, ev: &Event, caller: u32) {
         let key = if ev.sha256.is_empty() { finding_key(&ev.path, &ev.detection) } else { ev.sha256.clone() };
-        self.store.allowlist_add(&key, &format!("trusted by user: {} ({})", ev.path, ev.detection));
-        self.store.resolve(ev, "trusted");
+        // Scoped to the caller: a non-admin's trust covers their own files
+        // only (see Store::user_key); root's stays system-wide.
+        self.store.allowlist_add(&Store::user_key(caller, &key),
+                                 &format!("trusted by uid {caller}: {} ({})", ev.path, ev.detection));
+        self.store.resolve_scoped(ev, "trusted", (caller != 0).then_some(caller));
         self.notify(Notice::StatusChanged);
         self.reported.lock().unwrap_or_else(|p| p.into_inner()).remove(&ev.sha256);
     }

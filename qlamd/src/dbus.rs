@@ -169,8 +169,27 @@ impl Service {
             }
             _ => return Err(err(format!("unknown scan kind {kind}"))),
         };
-        let targets: Vec<PathBuf> = targets.into_iter().filter(|t| t.exists()).collect();
-        Ok(self.d.scanner.start(user, &kind, targets, scope, persistence))
+        // The cross-user gate applies to the FINAL targets of every scan kind,
+        // not just to "custom". Quick-scan targets come partly from the
+        // caller's own ~/.config/user-dirs.dirs, which accepted any absolute
+        // path — so XDG_DOWNLOAD_DIR="/root" had root walk another account's
+        // files with no scan-any prompt and hand the counts back via Scans().
+        let mut resolved: Vec<PathBuf> = Vec::new();
+        let mut needs_admin = false;
+        for t in targets {
+            let Ok(real) = std::fs::canonicalize(&t) else { continue };
+            if !scope.contains(&real) {
+                continue;
+            }
+            if home_owner(&real).is_some_and(|owner| owner != uid) {
+                needs_admin = true;
+            }
+            resolved.push(real);
+        }
+        if needs_admin && kind != "custom" {
+            authorize(conn, &hdr, "org.maze.qlam.scan-any").await?;
+        }
+        Ok(self.d.scanner.start(user, &kind, resolved, scope, persistence))
     }
 
     async fn cancel_scan(&self, id: String, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> fdo::Result<bool> {
@@ -191,7 +210,7 @@ impl Service {
     async fn trust_event(&self, event_id: &str, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> fdo::Result<()> {
         let uid = authorize(conn, &hdr, "org.maze.qlam.trust").await?;
         let ev = self.event_for(uid, event_id)?;
-        self.d.guard.trust_event(&ev);
+        self.d.guard.trust_event(&ev, uid);
         Ok(())
     }
 
@@ -214,7 +233,7 @@ impl Service {
         if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
             return Err(err("restore target must be a regular file"));
         }
-        quarantine::restore(&self.d.guard.store, &item, fd).map_err(err)?;
+        quarantine::restore(&self.d.guard.store, &item, fd, uid).map_err(err)?;
         log::info!("restored {} for uid {uid}", item.original_path);
         Ok(())
     }

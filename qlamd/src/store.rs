@@ -134,6 +134,21 @@ impl Store {
         self.allow.read().unwrap_or_else(|p| p.into_inner()).contains(sha256)
     }
 
+    /// Allowlist key for a decision made by `uid`. Root's decisions are
+    /// system-wide (bare key); anyone else's only cover files that user owns.
+    /// A per-user "trust" used to write the bare hash, which every later scan
+    /// of every user — and the realtime exec check — consulted first.
+    pub fn user_key(uid: u32, key: &str) -> String {
+        if uid == 0 { key.to_string() } else { format!("u{uid}:{key}") }
+    }
+
+    /// True if `key` is allowlisted system-wide or by `owner` (the uid that
+    /// owns the file or finding being judged).
+    pub fn is_allowlisted_for(&self, owner: Option<u32>, key: &str) -> bool {
+        self.is_allowlisted(key)
+            || owner.is_some_and(|u| u != 0 && self.is_allowlisted(&Self::user_key(u, key)))
+    }
+
     pub fn allowlist_add(&self, sha256: &str, note: &str) {
         let r = self.conn().execute(
             "INSERT OR REPLACE INTO allowlist (sha256, ts, note) VALUES (?1, ?2, ?3)",
@@ -204,6 +219,30 @@ impl Store {
     /// Settle every open finding about the same content (or, for content-less
     /// findings, the same path and detection) as `ev`.
     pub fn resolve(&self, ev: &Event, resolution: &str) {
+        self.resolve_scoped(ev, resolution, None)
+    }
+
+    /// Like [`resolve`], but limited to `uid`'s own events when given. A user
+    /// settling their finding must not mark other users' open findings with
+    /// the same hash as handled.
+    pub fn resolve_scoped(&self, ev: &Event, resolution: &str, uid: Option<u32>) {
+        if let Some(uid) = uid {
+            let r = if ev.sha256.is_empty() {
+                self.conn().execute(
+                    "UPDATE events SET resolution = ?1 WHERE resolution = '' AND path = ?2 AND detection = ?3 AND uid = ?4",
+                    params![resolution, ev.path, ev.detection, uid],
+                )
+            } else {
+                self.conn().execute(
+                    "UPDATE events SET resolution = ?1 WHERE resolution = '' AND sha256 = ?2 AND uid = ?3",
+                    params![resolution, ev.sha256, uid],
+                )
+            };
+            if let Err(e) = r {
+                log::error!("resolve: {e}");
+            }
+            return;
+        }
         let r = if ev.sha256.is_empty() {
             self.conn().execute(
                 "UPDATE events SET resolution = ?1 WHERE resolution = '' AND path = ?2 AND detection = ?3",

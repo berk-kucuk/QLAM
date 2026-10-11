@@ -532,7 +532,7 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
     let me = std::process::id() as i32;
     let meta_len = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut buf = vec![0u8; 256 * 1024];
-    let mut recent: HashMap<PathBuf, Instant> = HashMap::new();
+    let mut recent: HashMap<PathBuf, (Instant, FileKey)> = HashMap::new();
     let mut throttle = Throttle::new(Duration::from_secs(10));
     let mut overflow = Throttle::new(Duration::from_secs(10));
     let mut reserve = Reserve::new();
@@ -640,21 +640,28 @@ fn reader(s: Arc<Shared>, scope: Scope, stop_fd: RawFd, exec_tx: Sender<Job>, bg
                 if !exec && is_browser_shm(&path) {
                     continue;
                 }
-                let now = Instant::now();
-                if recent.get(&path).is_some_and(|t| now.duration_since(*t) < WRITE_DEBOUNCE) {
-                    continue;
-                }
-                if recent.len() > 4096 {
-                    recent.retain(|_, t| now.duration_since(*t) < WRITE_DEBOUNCE);
-                }
-                recent.insert(path.clone(), now);
                 // Note what was written and let the descriptor go now (it
                 // closes when `fd` drops at the end of this iteration).
                 let Ok(st) = fsutil::fstat(fd.as_fd()) else { continue };
                 if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_size as u64 > s.max_size {
                     continue;
                 }
-                let job = ScanJob { path, key: FileKey::of(&st), pid: m.pid, exec };
+                let key = FileKey::of(&st);
+                // Debounce by file STATE, not by path. Keyed on the path
+                // alone, a write -> rewrite -> exec within 2 s dropped the
+                // rewrite and the exec events, while the queued job for the
+                // first (benign) state was skipped by reopen()'s identity
+                // check — so the malicious content was never scanned. Only an
+                // event for the very same state is a duplicate.
+                let now = Instant::now();
+                if recent.get(&path).is_some_and(|(t, k)| *k == key && now.duration_since(*t) < WRITE_DEBOUNCE) {
+                    continue;
+                }
+                if recent.len() > 4096 {
+                    recent.retain(|_, (t, _)| now.duration_since(*t) < WRITE_DEBOUNCE);
+                }
+                recent.insert(path.clone(), (now, key));
+                let job = ScanJob { path, key, pid: m.pid, exec };
                 if let Err(TrySendError::Full(_)) = bg_tx.try_send(job) {
                     s.stats.dropped.fetch_add(1, Ordering::Relaxed);
                 }

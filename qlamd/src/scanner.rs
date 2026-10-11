@@ -47,8 +47,18 @@ impl User {
                 if let Some(v) = line.strip_prefix(key).and_then(|r| r.strip_prefix('=')) {
                     let v = v.trim().trim_matches('"');
                     let v = v.replacen("$HOME", &self.home.to_string_lossy(), 1);
+                    // This file belongs to the user and is read by root, so
+                    // it may only point INSIDE the user's own home. Anything
+                    // else ("/root", another home, "/etc") falls back to the
+                    // default instead of becoming a root scan target.
                     if v.starts_with('/') {
-                        return PathBuf::from(v);
+                        let cand = PathBuf::from(&v);
+                        let home = std::fs::canonicalize(&self.home).unwrap_or_else(|_| self.home.clone());
+                        if let Ok(real) = std::fs::canonicalize(&cand) {
+                            if real.starts_with(&home) {
+                                return real;
+                            }
+                        }
                     }
                 }
             }
