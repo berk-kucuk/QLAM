@@ -7,6 +7,7 @@ until the user picks one.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
@@ -101,12 +102,23 @@ class AlertsPage(QWidget):
         self.b_trust = QPushButton("I trust this file")
         self.b_trust.setObjectName("GhostButton")
         self.b_trust.clicked.connect(self._trust)
+        # Maze Glovebox, when installed: look at the file without letting it
+        # run loose — a copy, opened in a box with no network and none of the
+        # user's files. The finding itself is left exactly as it is.
+        self.b_glovebox = QPushButton("Look at it in Glovebox")
+        self.b_glovebox.setObjectName("GhostButton")
+        self.b_glovebox.setToolTip(
+            "Opens a copy of this file with its usual app inside Maze Glovebox:\n"
+            "no network, none of your files, deleted when it closes.\n"
+            "Useful to tell a false alarm from a real one. Nothing here changes.")
+        self.b_glovebox.clicked.connect(self._open_in_glovebox)
         self.b_folder = QPushButton("Show in folder")
         self.b_folder.setObjectName("GhostButton")
         self.b_folder.clicked.connect(self._open_folder)
         btns.addWidget(self.b_quarantine)
         btns.addWidget(self.b_trust)
         btns.addStretch(1)
+        btns.addWidget(self.b_glovebox)
         btns.addWidget(self.b_folder)
         d.addLayout(btns)
         split.addWidget(self.detail)
@@ -204,6 +216,9 @@ class AlertsPage(QWidget):
         self.b_quarantine.setVisible(can_act and bool(ev.get("sha256")) and exists)
         self.b_trust.setVisible(can_act)
         self.b_folder.setEnabled(exists)
+        self.b_glovebox.setVisible(
+            exists and ev.get("kind") != "persistence" and os.path.isfile(ev.get("path", ""))
+            and shutil.which("maze-glovebox") is not None)
 
     # ── Decisions ─────────────────────────────────────────────────────────
 
@@ -243,6 +258,15 @@ class AlertsPage(QWidget):
         self._busy(False)
         QMessageBox.warning(self, "Qlam", msg)
         self.changed.emit()
+
+    def _open_in_glovebox(self):
+        ev = self._selected()
+        if not ev or not ev.get("path"):
+            return
+        # Detached: the box lives as long as its app, not as long as Qlam.
+        subprocess.Popen(["maze-glovebox", "--open", ev["path"]],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
 
     def _open_folder(self):
         ev = self._selected()
