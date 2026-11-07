@@ -116,6 +116,52 @@ const FORGE_ASSET: &str = "yara-forge-rules-core.zip";
 const FORGE_FILE: &str = "yara-forge-core.yar";
 
 pub const STATE_FILE: &str = "state.json";
+/// Written while an update runs, removed when it ends: what it's doing, for
+/// the app to show. Holds the updater's pid, so a crashed run's leftover
+/// file isn't mistaken for a running one.
+pub const PROGRESS_FILE: &str = "progress.json";
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Progress {
+    pub pid: u32,
+    pub started_at: i64,
+    /// "MalwareBazaar", "ThreatFox", "URLhaus", "YARA Forge".
+    pub feed: String,
+    /// "full list", "recent additions", "rules".
+    pub stage: String,
+    pub bytes: u64,
+}
+
+impl Progress {
+    /// The running update's progress, if one is running.
+    pub fn load() -> Option<Progress> {
+        let p: Progress = serde_json::from_slice(&std::fs::read(feeds_dir().join(PROGRESS_FILE)).ok()?).ok()?;
+        std::path::Path::new(&format!("/proc/{}", p.pid)).exists().then_some(p)
+    }
+}
+
+/// The updater's own progress, written at most once a second.
+static PROGRESS: std::sync::Mutex<Option<(Progress, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+fn progress(feed: &str, stage: &str) {
+    let mut g = PROGRESS.lock().unwrap_or_else(|p| p.into_inner());
+    let started_at = g.as_ref().map(|(p, _)| p.started_at).unwrap_or_else(now);
+    let p = Progress { pid: std::process::id(), started_at, feed: feed.into(), stage: stage.into(), bytes: 0 };
+    let _ = write_atomic(&feeds_dir().join(PROGRESS_FILE), &serde_json::to_vec(&p).unwrap_or_default());
+    *g = Some((p, std::time::Instant::now()));
+}
+
+fn progress_bytes(bytes: u64) {
+    let mut g = PROGRESS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((p, at)) = g.as_mut() {
+        if at.elapsed() >= Duration::from_secs(1) {
+            p.bytes = bytes;
+            let _ = write_atomic(&feeds_dir().join(PROGRESS_FILE), &serde_json::to_vec(&*p).unwrap_or_default());
+            *at = std::time::Instant::now();
+        }
+    }
+}
 
 /// State of one abuse.ch list.
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -170,6 +216,7 @@ pub fn run() -> i32 {
     }
     let mut state = FeedState::load();
     state.errors.clear();
+    progress("", "starting");
 
     update_abusech(&dir, &mut state);
     if let Err(e) = update_yara_forge(&dir, &mut state) {
@@ -178,6 +225,7 @@ pub fn run() -> i32 {
     }
 
     state.updated_at = now();
+    let _ = std::fs::remove_file(dir.join(PROGRESS_FILE));
     match serde_json::to_vec_pretty(&state) {
         Ok(json) => {
             if let Err(e) = write_atomic(&dir.join(STATE_FILE), &json) {
@@ -251,6 +299,7 @@ fn update_list(agent: &ureq::Agent, feed: &AbuseFeed, dir: &Path, st: &mut ListS
     let mut have_full = false;
     if let Some(file) = full {
         log::info!("{}: downloading full export", feed.name);
+        progress(feed.name, "full list");
         let tmp = dir.join(format!(".{}.zip.part", feed.list));
         let res = download_to(agent, &url(file), &tmp, 1024 * 1024 * 1024).and_then(|_| {
             let mut zip = zip::ZipArchive::new(File::open(&tmp)?).map_err(io::Error::other)?;
@@ -287,6 +336,7 @@ fn update_list(agent: &ureq::Agent, feed: &AbuseFeed, dir: &Path, st: &mut ListS
             builder.read_file(&target)?;
         }
         let before = builder.len();
+        progress(feed.name, "recent additions");
         let body = get(agent, &url(feed.recent), 200 * 1024 * 1024)?;
         parse_csv(BufReader::new(&body[..]), feed.row, &mut builder)?;
         log::info!("{}: {} entries from the recent export", feed.name, builder.len() - before);
@@ -470,6 +520,7 @@ struct Asset {
 }
 
 fn update_yara_forge(dir: &Path, state: &mut FeedState) -> io::Result<()> {
+    progress("YARA Forge", "rules");
     let agent = agent();
     let target = dir.join(FORGE_FILE);
     let body = get(&agent, FORGE_API, 1024 * 1024)?;
@@ -547,19 +598,30 @@ fn get(agent: &ureq::Agent, url: &str, limit: u64) -> io::Result<Vec<u8>> {
 }
 
 /// Download `url` to `dest`. A connection that breaks off is resumed where
-/// it stopped (HTTP Range), up to DOWNLOAD_TRIES times: the full exports are
-/// hundreds of megabytes, and starting over each time may never finish.
+/// it stopped (HTTP Range): the full exports are hundreds of megabytes, and
+/// on 2026-11-07 the connection broke every 30-45 seconds, each time
+/// further along. So resuming goes on as long as attempts make progress;
+/// STALLED_TRIES in a row without any, or MAX_TRIES in all, give up.
 fn download_to(agent: &ureq::Agent, url: &str, dest: &Path, limit: u64) -> io::Result<()> {
     use std::io::{Seek, SeekFrom};
-    const DOWNLOAD_TRIES: u64 = 5;
+    const STALLED_TRIES: u64 = 5;
+    const MAX_TRIES: u64 = 100;
     let mut f = File::create(dest)?;
     let mut have: u64 = 0;
     let mut last = io::Error::other("download failed");
-    for attempt in 0..DOWNLOAD_TRIES {
+    let mut stalled = 0;
+    let mut before = 0;
+    for attempt in 0..MAX_TRIES {
         if attempt > 0 {
-            log::info!("download broke off at {} MB ({last}); resuming, attempt {}/{DOWNLOAD_TRIES}", have >> 20, attempt + 1);
-            std::thread::sleep(Duration::from_secs(5 * attempt));
+            stalled = if have > before { 0 } else { stalled + 1 };
+            if stalled >= STALLED_TRIES {
+                break;
+            }
+            log::info!("download broke off at {} MB ({last}); resuming (attempt {})", have >> 20, attempt + 1);
+            // Back off only when nothing is getting through.
+            std::thread::sleep(Duration::from_secs(1 + 5 * stalled));
         }
+        before = have;
         let mut req = agent.get(url);
         if have > 0 {
             req = req.header("Range", format!("bytes={have}-"));
@@ -592,6 +654,7 @@ fn download_to(agent: &ureq::Agent, url: &str, dest: &Path, limit: u64) -> io::R
                 Ok(n) => {
                     f.write_all(&buf[..n])?;
                     have += n as u64;
+                    progress_bytes(have);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => break Err(e),
@@ -602,7 +665,7 @@ fn download_to(agent: &ureq::Agent, url: &str, dest: &Path, limit: u64) -> io::R
             Err(e) => last = e,
         }
     }
-    // Out of attempts, or the server says there's nothing left to send
+    // Stalled, out of attempts, or the server says there's nothing left to send
     // (416). Only whole if the zip's directory at its end is there.
     f.sync_all()?;
     if have > 0 && zip::ZipArchive::new(&f).is_ok() { Ok(()) } else { Err(last) }

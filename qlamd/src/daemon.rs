@@ -13,7 +13,7 @@ use crate::realtime::Realtime;
 use crate::scanner::Scanner;
 use crate::schedule::{Depth, Frequency};
 use crate::store::now;
-use crate::updater::{FeedState, STATE_FILE};
+use crate::updater::{FeedState, Progress, PROGRESS_FILE, STATE_FILE};
 
 pub struct Daemon {
     /// Development instance on the session bus: no real-time protection.
@@ -185,6 +185,8 @@ impl Daemon {
                 "clamav": self.guard.engine.clamd_available(),
             },
             "feeds": FeedState::load(),
+            // A signature update running right now, and how far it got.
+            "update": Progress::load(),
             "abusech_key_set": crate::config::abusech_key().is_some(),
             "user": {
                 "uid": uid,
@@ -249,7 +251,8 @@ impl Daemon {
         });
     }
 
-    /// Reload signatures whenever the updater publishes a new state.json.
+    /// Reload signatures whenever the updater publishes a new state.json, and
+    /// tell the app while an update makes progress, so it can show it.
     pub fn watch_feeds(self: &Arc<Self>) {
         self.recheck_in_background();
         let me = self.clone();
@@ -257,9 +260,17 @@ impl Daemon {
             .name("feed-watch".into())
             .spawn(move || {
                 let path = feeds_dir().join(STATE_FILE);
+                let progress = feeds_dir().join(PROGRESS_FILE);
                 let mut last = mtime(&path);
+                let mut last_progress = mtime(&progress);
                 loop {
-                    std::thread::sleep(Duration::from_secs(30));
+                    // Two stats every 2 s: cheap, and progress shows promptly.
+                    std::thread::sleep(Duration::from_secs(2));
+                    let p = mtime(&progress);
+                    if p != last_progress {
+                        last_progress = p;
+                        me.guard.notify(Notice::StatusChanged);
+                    }
                     let m = mtime(&path);
                     if m != last {
                         last = m;

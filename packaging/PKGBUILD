@@ -1,7 +1,7 @@
 # Maintainer: Berk Küçük <berkkucukk@proton.me>
 
 pkgname=qlam
-pkgver=2.2.1
+pkgver=2.2.2
 pkgrel=1
 pkgdesc="Warn-first antivirus for Linux: on-access protection for user files, with a desktop app — for Maze Linux"
 arch=('x86_64')

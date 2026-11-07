@@ -1,6 +1,6 @@
 [package]
 name = "qlamd"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2021"
 description = "Qlam on-access antivirus daemon"
 license = "MIT"

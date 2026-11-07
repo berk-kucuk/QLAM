@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.theme import load_prefs, save_pref, save_theme, theme
-from ui.widgets import Card, ago, label, page_header, when
+from ui.widgets import Card, ago, label, page_header, update_text, when
 
 _AUTOSTART_OVERRIDE = Path.home() / ".config" / "autostart" / "qlam-tray.desktop"
 
@@ -210,7 +210,9 @@ class SettingsPage(QWidget):
         for t in (self.t_rt, self.t_block, self.t_autoq, self.t_behav):
             t.setEnabled(on)
         self.t_block.setEnabled(on and bool(rt.get("enabled")))
-        self.b_update.setEnabled(on)
+        upd = st.get("update")
+        self.b_update.setEnabled(on and not upd)
+        self.b_update.setText("Updating…" if upd else "Update now")
 
         sch = st.get("schedule") or {}
         idx = next((i for i, (f, k, _) in enumerate(_SCHEDULES)
@@ -239,15 +241,22 @@ class SettingsPage(QWidget):
             "Archives and packages are checked inside: zip, jar, tar, deb, rpm, gz, xz, bz2, zst",
             "ClamAV engine: " + ("in use" if eng.get("clamav") else
                                   "not running (optional — enable clamav-daemon for extra coverage, ~1 GB RAM)"),
-            f"Last update: {ago(feeds.get('updated_at'))}",
         ]
+        if upd:
+            lines.append(f"Updating now — {update_text(upd)}…")
+        else:
+            lists = [(n, feeds.get(k) or {}) for n, k in
+                     (("MalwareBazaar", "malwarebazaar"), ("ThreatFox", "threatfox"), ("URLhaus", "urlhaus"))]
+            got = [f"{n} {int(l.get('entries', 0)):,}" for n, l in lists if l.get("updated_at")]
+            lines.append(f"Last update: {ago(feeds.get('updated_at'))}"
+                         + (f" ({' · '.join(got)})" if got else ""))
         if not self._has_key:
             lines.append("The known-malware lists are not being updated: abuse.ch needs a free "
                          "Auth-Key. Set one below.")
         elif feeds.get("abusech_key") == "rejected":
             lines.append("abuse.ch did not accept the Auth-Key. Check it on auth.abuse.ch and set it again.")
         errors = [e for e in feeds.get("errors", []) if "Auth-Key" not in e]
-        if errors:
+        if errors and not upd:
             lines.append("Last update had problems: " + "; ".join(errors))
         self.sig_text.setText("\n".join(lines))
         self.about.setText(
@@ -277,15 +286,15 @@ class SettingsPage(QWidget):
         self.b_update.setEnabled(False)
         self.b_update.setText("Updating…")
 
-        def finish(msg=None):
+        def failed(msg):
             self.b_update.setEnabled(True)
             self.b_update.setText("Update now")
-            if msg:
-                QMessageBox.warning(self, "Qlam", msg)
+            QMessageBox.warning(self, "Qlam", msg)
 
-        # The update runs in the background as its own service; the status
-        # refreshes by itself when new signatures are loaded.
-        self.client.update_signatures(done=lambda _r: finish(), fail=finish)
+        # The update runs in the background as its own service. The daemon
+        # reports its progress, which keeps this button on "Updating…" and
+        # shows what it's doing until it's done.
+        self.client.update_signatures(done=lambda _r: self.client.refresh_status(), fail=failed)
 
     def _set_schedule(self, idx: int):
         if self._loading or idx < 0:

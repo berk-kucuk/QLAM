@@ -31,6 +31,16 @@ def when(ts: int | float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%d %b %Y, %H:%M") if ts else "—"
 
 
+def update_text(upd: dict) -> str:
+    """'MalwareBazaar: downloading the full list, 55 MB' for a running update."""
+    feed = upd.get("feed") or ""
+    stage = {"full list": "downloading the full list", "recent additions": "downloading recent additions",
+             "rules": "checking for new rules", "starting": "starting"}.get(upd.get("stage", ""), upd.get("stage", ""))
+    mb = int(upd.get("bytes", 0)) >> 20
+    text = f"{feed}: {stage}" if feed else stage.capitalize()
+    return text + (f", {mb} MB" if mb else "")
+
+
 def short_path(path: str, keep: int = 60) -> str:
     home = os.path.expanduser("~")
     if path.startswith(home + "/"):

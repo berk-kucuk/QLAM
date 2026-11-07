@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.theme import theme
-from ui.widgets import Card, Chip, ago, chip_for, headline, label, page_header, short_path
+from ui.widgets import Card, Chip, ago, chip_for, headline, label, page_header, short_path, update_text
 
 
 class _Component(Card):
@@ -223,9 +223,13 @@ class OverviewPage(QWidget):
         stale = not updated or (time.time() - updated) > 3 * 86400
         self.sigs.value.setText(f"{hashes:,}")
         extra = " · ClamAV on" if eng.get("clamav") else ""
-        self.sigs.detail.setText(f"known malware samples · {rules:,} rules{extra}\nupdated {ago(updated)}")
+        when_line = f"updating — {update_text(st['update'])}" if st.get("update") else f"updated {ago(updated)}"
+        self.sigs.detail.setText(f"known malware samples · {rules:,} rules{extra}\n{when_line}")
         needs_key = not st.get("abusech_key_set") or feeds.get("abusech_key") == "rejected"
-        if hashes == 0:
+        if st.get("update"):
+            self.sigs.chip.setText("Updating")
+            self.sigs.chip.set_level("info")
+        elif hashes == 0:
             self.sigs.chip.setText("Missing")
             self.sigs.chip.set_level("warn")
         elif stale or needs_key:
