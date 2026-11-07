@@ -23,6 +23,8 @@ _KINDS = {
     "custom": ("fa5s.folder-open", "Choose a folder",
                "Scan a folder of your choice, such as a USB stick."),
 }
+# Started by Qlam itself; never offered as a button.
+_HISTORY_NAMES = {"quick": "Quick", "home": "Home folder", "custom": "Folder", "scheduled": "Scheduled"}
 
 
 class _Option(Card):
@@ -159,7 +161,7 @@ class ScanPage(QWidget):
     def _show_running(self, kind: str, paths: list[str]):
         self._set_options_enabled(False)
         self.panel.show()
-        title = _KINDS.get(kind, _KINDS["custom"])[1]
+        title = "Scheduled scan" if kind == "scheduled" else _KINDS.get(kind, _KINDS["custom"])[1]
         if paths:
             title += f": {short_path(paths[0], 50)}"
         self.p_title.setText(title)
@@ -227,7 +229,8 @@ class ScanPage(QWidget):
             noted = int(s.get("suspicious", 0))
             result = {"cancelled": "Stopped", "failed": "Interrupted"}.get(
                 s.get("status"), "Threats found" if found else ("Notices" if noted else "Clean"))
-            vals = [when(s.get("started")), s.get("kind", "").capitalize(),
+            kind = s.get("kind", "")
+            vals = [when(s.get("started")), _HISTORY_NAMES.get(kind, kind.capitalize()),
                     f"{int(s.get('files', 0)):,}", str(found + noted), result]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)

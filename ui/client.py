@@ -183,6 +183,14 @@ class QlamClient(QObject):
     def update_signatures(self, done=None, fail=None):
         self._call_async("UpdateSignatures", done=done, fail=fail)
 
+    def set_schedule(self, frequency: str, kind: str, done=None, fail=None):
+        """frequency: off | daily | weekly; kind: quick | home."""
+        self._call_async("SetSchedule", frequency, kind, done=done, fail=fail)
+
+    def set_abusech_key(self, key: str, done=None, fail=None):
+        """Store the abuse.ch Auth-Key ("" removes it); updates right after."""
+        self._call_async("SetAbusechKey", key, done=done, fail=fail)
+
     # ── Signals from the daemon ───────────────────────────────────────────
 
     @pyqtSlot(QDBusMessage)

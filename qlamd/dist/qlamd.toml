@@ -31,3 +31,11 @@ clamd_socket = "/run/clamav/clamd.ctl"
 # Threads for exec checks (only used with block_exec) and background scans.
 exec_workers = 2
 background_workers = 1
+
+# Scheduled scan of every user's files: "off", "daily" or "weekly". It waits
+# until the computer has been on for 15 minutes, no other scan is running and
+# it is on mains power (unless a whole period overdue).
+scheduled_scan = "weekly"
+# "quick" (downloads, desktop, startup entries, temp folders) or "home" (the
+# whole home folder).
+scheduled_scan_depth = "quick"

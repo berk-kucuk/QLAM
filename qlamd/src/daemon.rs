@@ -11,12 +11,14 @@ use crate::config::{feeds_dir, Config, Scope};
 use crate::guard::{Guard, Notice};
 use crate::realtime::Realtime;
 use crate::scanner::Scanner;
+use crate::schedule::{Depth, Frequency};
 use crate::store::now;
 use crate::updater::{FeedState, STATE_FILE};
 
 pub struct Daemon {
     /// Development instance on the session bus: no real-time protection.
     pub session: bool,
+    pub started_at: i64,
     cfg: Mutex<Config>,
     pub guard: Arc<Guard>,
     pub scanner: Arc<Scanner>,
@@ -34,12 +36,19 @@ impl Daemon {
                 set_cfg_bool(&mut cfg, key, v);
             }
         }
+        if let Some(f) = guard.store.setting("scheduled_scan").and_then(|v| Frequency::parse(&v)) {
+            cfg.scheduled_scan = f;
+        }
+        if let Some(d) = guard.store.setting("scheduled_scan_depth").and_then(|v| Depth::parse(&v)) {
+            cfg.scheduled_scan_depth = d;
+        }
         if session {
             cfg.realtime = false;
         }
         guard.auto_quarantine.store(cfg.auto_quarantine, Ordering::Relaxed);
         Arc::new(Daemon {
             session,
+            started_at: now(),
             scanner: Arc::new(Scanner::new(guard.clone())),
             guard,
             cfg: Mutex::new(cfg),
@@ -101,6 +110,21 @@ impl Daemon {
         Ok(())
     }
 
+    pub fn set_schedule(&self, frequency: &str, depth: &str) -> Result<(), String> {
+        let f = Frequency::parse(frequency).ok_or_else(|| format!("unknown frequency {frequency}"))?;
+        let d = Depth::parse(depth).ok_or_else(|| format!("unknown scan kind {depth}"))?;
+        {
+            let mut cfg = self.cfg.lock().unwrap_or_else(|p| p.into_inner());
+            cfg.scheduled_scan = f;
+            cfg.scheduled_scan_depth = d;
+        }
+        self.guard.store.set_setting("scheduled_scan", f.as_str());
+        self.guard.store.set_setting("scheduled_scan_depth", d.as_str());
+        log::info!("scheduled scan: {} {}", f.as_str(), d.as_str());
+        self.guard.notify(Notice::StatusChanged);
+        Ok(())
+    }
+
     pub fn stop(&self) {
         if let Some(r) = self.realtime.lock().unwrap_or_else(|p| p.into_inner()).take() {
             r.stop();
@@ -153,10 +177,12 @@ impl Daemon {
             },
             "engines": {
                 "hashes": sigs.hashes.len(),
+                "urls": sigs.urls.len(),
                 "yara_rules": sigs.yara.len(),
                 "clamav": self.guard.engine.clamd_available(),
             },
             "feeds": FeedState::load(),
+            "abusech_key_set": crate::config::abusech_key().is_some(),
             "user": {
                 "uid": uid,
                 "threats_30d": store.threat_count(user, now() - 30 * 24 * 3600),
@@ -166,6 +192,7 @@ impl Daemon {
                 "running_scans": self.scanner.running_for(uid),
             },
             "scope": cfg.scope,
+            "schedule": crate::schedule::status(self),
         })
         .to_string()
     }
@@ -192,7 +219,13 @@ impl Daemon {
             if !f.metadata().is_ok_and(|m| m.is_file()) {
                 continue;
             }
-            let verdict = self.guard.engine.scan_fd(f.as_fd(), Path::new(&path), RECHECK_MAX_SIZE, &mut buf);
+            let verdict = self.guard.engine.scan_fd(
+                f.as_fd(),
+                Path::new(&path),
+                RECHECK_MAX_SIZE,
+                Some(&crate::engine::archive::Limits::ON_DEMAND),
+                &mut buf,
+            );
             crate::fsutil::trim_buffer(&mut buf);
             if verdict.is_ok_and(|v| v.severity == crate::engine::Severity::Clean) {
                 store.resolve_detection(&path, &detection, "cleared");

@@ -43,6 +43,18 @@ impl HashDb {
         db
     }
 
+    /// A single list file (e.g. URLhaus's URL list, which isn't merged into
+    /// the file-hash list). Missing or corrupt: an empty list.
+    pub fn load_file(path: &Path) -> HashDb {
+        let mut builder = Builder::default();
+        match builder.read_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("{}: {e}", path.display()),
+        }
+        builder.build()
+    }
+
     pub fn len(&self) -> usize {
         self.hashes.len()
     }

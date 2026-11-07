@@ -19,6 +19,7 @@ mod persistence;
 mod quarantine;
 mod realtime;
 mod scanner;
+mod schedule;
 mod store;
 mod supervise;
 mod updater;
@@ -91,6 +92,10 @@ fn run_daemon(session: bool) -> i32 {
     let d = daemon::Daemon::new(cfg, guard, session);
     d.apply_realtime();
     d.watch_feeds();
+    // The development instance can't read other users' homes.
+    if !session {
+        schedule::spawn(d.clone());
+    }
 
     let _conn = match dbus::serve(d.clone(), rx, session) {
         Ok(c) => c,
@@ -161,7 +166,7 @@ fn scan_foreground(paths: &[String]) -> i32 {
         }
         let Ok(f) = std::fs::File::open(&p) else { continue };
         files += 1;
-        if let Ok(v) = engine.scan_fd(f.as_fd(), &p, 256 << 20, &mut buf) {
+        if let Ok(v) = engine.scan_fd(f.as_fd(), &p, 256 << 20, Some(&engine::archive::Limits::ON_DEMAND), &mut buf) {
             if v.severity != engine::Severity::Clean {
                 hits += 1;
                 let tag = if v.is_confirmed() { "confirmed" } else { "pattern" };

@@ -224,17 +224,22 @@ class OverviewPage(QWidget):
         self.sigs.value.setText(f"{hashes:,}")
         extra = " · ClamAV on" if eng.get("clamav") else ""
         self.sigs.detail.setText(f"known malware samples · {rules:,} rules{extra}\nupdated {ago(updated)}")
+        needs_key = not st.get("abusech_key_set") or feeds.get("abusech_key") == "rejected"
         if hashes == 0:
             self.sigs.chip.setText("Missing")
             self.sigs.chip.set_level("warn")
-        elif stale:
+        elif stale or needs_key:
             self.sigs.chip.setText("Out of date")
             self.sigs.chip.set_level("warn")
         else:
             self.sigs.chip.setText("Up to date")
             self.sigs.chip.set_level("good")
-        if feeds.get("errors"):
+        if needs_key:
+            self.sigs.detail.setToolTip("The abuse.ch lists need a free Auth-Key. Set it in Settings.")
+        elif feeds.get("errors"):
             self.sigs.detail.setToolTip("\n".join(feeds["errors"]))
+        else:
+            self.sigs.detail.setToolTip("")
 
         # Last scan.
         last = user.get("last_scan")

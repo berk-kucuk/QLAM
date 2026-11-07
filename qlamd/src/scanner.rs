@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::Scope;
-use crate::engine::Severity;
+use crate::engine::{archive, Severity};
 use crate::guard::{Guard, Notice, Trigger};
 use crate::persistence;
 use crate::store::{now, ScanRecord};
@@ -122,12 +122,34 @@ impl Scanner {
     /// Start a scan job. `targets` must already be authorised and resolved;
     /// `persistence_home` adds the persistence checks for that user.
     pub fn start(self: &Arc<Self>, user: User, kind: &str, targets: Vec<PathBuf>, scope: Scope, persistence_home: bool) -> String {
+        let (rec, cancel) = self.register(&user, kind, &targets);
+        let id = rec.id.clone();
+        let me = self.clone();
+        std::thread::Builder::new()
+            .name(format!("scan-{}", &id[..8]))
+            .spawn(move || me.run_job(rec, cancel, user, targets, scope, persistence_home))
+            .expect("spawn scan thread");
+        id
+    }
+
+    /// Run a scan job on the calling thread (scheduled scans, which run one
+    /// user after another). Returns the finished record.
+    pub fn run(&self, user: User, kind: &str, targets: Vec<PathBuf>, scope: Scope, persistence_home: bool) -> ScanRecord {
+        let (rec, cancel) = self.register(&user, kind, &targets);
+        self.run_job(rec, cancel, user, targets, scope, persistence_home)
+    }
+
+    /// Any scan running, whoever started it.
+    pub fn busy(&self) -> bool {
+        !self.jobs.lock().unwrap_or_else(|p| p.into_inner()).is_empty()
+    }
+
+    fn register(&self, user: &User, kind: &str, targets: &[PathBuf]) -> (ScanRecord, Arc<AtomicBool>) {
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         self.jobs.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), (user.uid, cancel.clone()));
-
-        let mut rec = ScanRecord {
-            id: id.clone(),
+        let rec = ScanRecord {
+            id,
             uid: user.uid,
             kind: kind.into(),
             targets: targets.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
@@ -140,40 +162,46 @@ impl Scanner {
             status: "running".into(),
         };
         self.guard.store.scan_save(&rec);
+        (rec, cancel)
+    }
 
-        let me = self.clone();
-        std::thread::Builder::new()
-            .name(format!("scan-{}", &id[..8]))
-            .spawn(move || {
-                // The user asked for this scan, so it keeps going under load,
-                // but it yields to everything else.
-                crate::fsutil::lower_priority(crate::fsutil::IoPriority::Low, 10);
-                let mut prog = Progress { files: 0, detections: 0, suspicious: 0, errors: 0 };
-                if persistence_home {
-                    for f in persistence::check_home(&user.home, Some(&user.name)) {
-                        me.guard.report_finding(&f.path, user.uid, f.name, &f.detail);
-                        prog.suspicious += 1;
-                    }
+    fn run_job(
+        &self,
+        mut rec: ScanRecord,
+        cancel: Arc<AtomicBool>,
+        user: User,
+        targets: Vec<PathBuf>,
+        scope: Scope,
+        persistence_home: bool,
+    ) -> ScanRecord {
+        // The user asked for this scan, so it keeps going under load, but it
+        // yields to everything else.
+        crate::fsutil::lower_priority(crate::fsutil::IoPriority::Low, 10);
+        let mut prog = Progress { files: 0, detections: 0, suspicious: 0, errors: 0 };
+        if persistence_home {
+            for f in persistence::check_home(&user.home, Some(&user.name)) {
+                if self.guard.report_finding(&f.path, user.uid, f.name, &f.detail).is_some() {
+                    prog.suspicious += 1;
                 }
-                let mut walker = Walker { scanner: &me, id: &rec.id, scope: &scope, cancel: &cancel, buf: Vec::new(), last: Instant::now(), prog };
-                for t in &targets {
-                    walker.walk(t);
-                }
-                let prog = walker.prog;
+            }
+        }
+        let mut walker = Walker { scanner: self, id: &rec.id, scope: &scope, cancel: &cancel, buf: Vec::new(), last: Instant::now(), prog };
+        for t in &targets {
+            walker.walk(t);
+        }
+        let prog = walker.prog;
 
-                rec.finished = now();
-                rec.files = prog.files as i64;
-                rec.detections = prog.detections as i64;
-                rec.suspicious = prog.suspicious as i64;
-                rec.errors = prog.errors as i64;
-                rec.status = if cancel.load(Ordering::Relaxed) { "cancelled" } else { "finished" }.into();
-                me.guard.store.scan_save(&rec);
-                me.jobs.lock().unwrap_or_else(|p| p.into_inner()).remove(&rec.id);
-                log::info!("scan {} {}: {} files, {} detections", rec.id, rec.status, rec.files, rec.detections);
-                me.guard.notify(Notice::ScanFinished { id: rec.id.clone() });
-            })
-            .expect("spawn scan thread");
-        id
+        rec.finished = now();
+        rec.files = prog.files as i64;
+        rec.detections = prog.detections as i64;
+        rec.suspicious = prog.suspicious as i64;
+        rec.errors = prog.errors as i64;
+        rec.status = if cancel.load(Ordering::Relaxed) { "cancelled" } else { "finished" }.into();
+        self.guard.store.scan_save(&rec);
+        self.jobs.lock().unwrap_or_else(|p| p.into_inner()).remove(&rec.id);
+        log::info!("scan {} ({}) {}: {} files, {} detections", rec.id, rec.kind, rec.status, rec.files, rec.detections);
+        self.guard.notify(Notice::ScanFinished { id: rec.id.clone() });
+        rec
     }
 }
 
@@ -229,7 +257,7 @@ impl Walker<'_> {
         }
         self.prog.files += 1;
         let guard = &self.scanner.guard;
-        match guard.engine.scan_fd(file.as_fd(), path, ONDEMAND_MAX_SIZE, &mut self.buf) {
+        match guard.engine.scan_fd(file.as_fd(), path, ONDEMAND_MAX_SIZE, Some(&archive::Limits::ON_DEMAND), &mut self.buf) {
             Ok(v) if v.severity != Severity::Clean => {
                 if v.is_malicious() {
                     self.prog.detections += 1;

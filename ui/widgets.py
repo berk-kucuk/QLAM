@@ -72,6 +72,18 @@ def chip_for(ev: dict) -> tuple[str, str]:
     return {"danger": "Malware", "warn": "Warning", "notice": "Notice", "info": "Info"}[lvl], lvl
 
 
+# Must match qlamd's engine::IN_ARCHIVE.
+_IN_ARCHIVE = " in archive member "
+
+
+def archive_member(ev: dict) -> tuple[str, str] | None:
+    """(detection, member path) for a finding about a file inside an archive."""
+    if not ev.get("engine", "").startswith("archive:"):
+        return None
+    name, sep, member = ev.get("detection", "").rpartition(_IN_ARCHIVE)
+    return (name, member) if sep else None
+
+
 def headline(ev: dict) -> str:
     kind = ev.get("kind", "")
     if kind == "safety-pause":
@@ -82,6 +94,11 @@ def headline(ev: dict) -> str:
         return "File moved to quarantine"
     if kind == "persistence":
         return "Unusual startup entry"
+    if ev.get("engine") == "urlhaus":
+        return "Downloaded from a malware site"
+    inside = archive_member(ev)
+    if inside and ev.get("severity") == "malicious":
+        return "Malware inside an archive" if inside[0].endswith("(known sample)") else "Possible malware inside an archive"
     if ev.get("severity") == "malicious":
         return "Known malware found" if ev.get("confirmed") else "Possible malware"
     return "Worth a look"
@@ -100,6 +117,31 @@ def explanation(ev: dict) -> str:
             f"    {detail}\n\n"
             "If you added this yourself, mark it as trusted and Qlam won't mention it again."
         )
+    if ev.get("engine") == "urlhaus":
+        family = name.removeprefix("URLhaus.MalwareDownload").lstrip(".")
+        what = f" ({family})" if family else ""
+        return (
+            "This file was downloaded from an address that URLhaus, a public list of "
+            f"malware distribution sites, lists as spreading malware{what}. Whatever the "
+            "file looks like, where it came from is reason enough not to open it.\n\n"
+            "Moving it to quarantine is recommended. Nothing has been changed yet."
+        )
+    inside = archive_member(ev)
+    if inside:
+        found, member = inside
+        if found.endswith("(known sample)"):
+            family = found.removesuffix(" (known sample)")
+            text = (f"This archive contains a file, {member}, that is byte-for-byte identical to "
+                    f"a known sample of {family}.")
+        elif ev.get("severity") == "malicious":
+            text = (f"This archive contains a file, {member}, that matches a pattern ({found}) "
+                    "characteristic of malware. Pattern matches can occasionally be wrong.")
+        else:
+            text = (f"This archive contains a file, {member}, with traits ({found}) that malware "
+                    "and hacking tools sometimes share. It is often harmless.")
+        return text + ("\n\nNothing inside has been unpacked or run. If you don't need this archive, "
+                       "moving it to quarantine is the safe choice; if you trust where it came from, "
+                       "mark it as trusted.")
     if ev.get("severity") == "malicious" and ev.get("confirmed"):
         family = name.removesuffix(" (known sample)")
         text = (f"This file is byte-for-byte identical to a known sample of {family}. "

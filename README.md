@@ -46,6 +46,16 @@ download and run.
   every program run from them, are checked in the background (fanotify).
 - **On-demand scans** — quick (downloads, desktop, startup entries, temporary
   folders), whole home folder, or any folder you pick.
+- **Scheduled scans** — a weekly quick scan of every user by default (daily,
+  whole home folder or off in Settings). It waits until the computer has been
+  on for a while and is on mains power.
+- **Archives and packages** — zip (and jar, wheel), tar, `.deb` and `.rpm`
+  packages, and gzip/xz/bzip2/zstd files are opened and every file inside is
+  checked, nested archives included. Maintainer scripts of packages too.
+- **Download origin** — a file downloaded from a URL that URLhaus lists as
+  spreading malware is reported whatever its content (Chromium-based
+  browsers, `wget --xattr` and `curl --xattr` record where a download came
+  from).
 - **Startup checks** — autostart entries, systemd user units, shell startup
   files, crontabs and `LD_PRELOAD` settings are checked for the ways malware
   keeps itself running.
@@ -66,10 +76,19 @@ download and run.
 
 | Engine | What it finds | Acts on its own? |
 |---|---|---|
-| Known-sample list | Files identical (SHA-256) to malware samples from [MalwareBazaar](https://bazaar.abuse.ch) — Linux file types only, and only samples attributed to a known family | Can block execution, if you enable it |
-| Qlam rules (YARA) | Linux miners, botnets, rootkits, droppers, reverse shells, webshells | No — warnings only |
+| Known-sample list | Files identical (SHA-256) to malware samples from [MalwareBazaar](https://bazaar.abuse.ch) and [ThreatFox](https://threatfox.abuse.ch) — Linux file types and families only, only samples attributed to a known family, ThreatFox at confidence 75% or more | Can block execution, if you enable it |
+| Malware URLs | Downloads whose recorded origin is a [URLhaus](https://urlhaus.abuse.ch) malware URL (last 30 days) | No — warnings only |
+| Qlam rules (YARA) | Linux miners and their configs (XMRig, Kinsing, TeamTNT), botnets (Mirai, Gafgyt, Mozi, Tsunami, XorDDoS) and their loaders, backdoors (BPFDoor, SSH key injection, Perl ShellBot), rootkits (`LD_PRELOAD`, kernel modules), cloud credential stealers, ransomware, reverse shells, webshells, offensive tools (Sliver, mimipenguin) | No — warnings only |
 | YARA Forge rules | Community rules for Linux executables ([YARA Forge](https://github.com/YARAHQ/yara-forge)), counted only on ELF files | No — warnings only |
 | ClamAV (optional) | ClamAV signatures, through a running `clamav-daemon` | No — warnings only |
+
+Archives are opened for every engine but ClamAV (which opens them itself).
+A finding inside an archive is always a warning, even an exact match: the
+archive isn't what runs, and you decide about it as a whole. Opening is
+bounded so a crafted archive can't exhaust the machine: decompressed bytes in
+total (256 MB on access, 512 MB in a scan), one member in memory at a time
+(32 / 48 MB), nesting depth, member count and time. 7z, rar and AppImage are
+not opened.
 
 Guards against false alarms:
 
@@ -84,6 +103,13 @@ Guards against false alarms:
 
 Signatures are refreshed daily by `qlam-update.service`, which runs as an
 unprivileged user in a sandbox.
+
+The abuse.ch lists (MalwareBazaar, ThreatFox, URLhaus) need a free abuse.ch
+Auth-Key: sign in at [auth.abuse.ch](https://auth.abuse.ch/), copy the key from
+your profile, and paste it in **Settings → Signatures → Set abuse.ch
+Auth-Key**. It is stored in `/var/lib/qlam/abusech.key` (root:qlam, 0640) and
+never written to logs. Without it the lists keep their last version and stop
+getting new entries; the pattern rules still update.
 
 ## Architecture
 
@@ -155,6 +181,9 @@ sudo systemctl enable --now qlamd.service qlam-update.timer
 sudo systemctl start qlam-update.service   # first signature download, a few minutes
 ```
 
+Then set your abuse.ch Auth-Key in the app (see [How detection works](#how-detection-works)) so the
+known-malware list can download.
+
 Then open **Qlam** from your application launcher (or run `qlam`). The tray
 icon starts automatically at your next login.
 
@@ -190,7 +219,7 @@ Actions that change something ask polkit:
 |---|---|
 | Scan your own files, update signatures, quarantine or delete your own findings | Allowed |
 | Restore from quarantine, trust a file | Your own password |
-| Scan other users' folders, change protection settings | Administrator password |
+| Scan other users' folders, change protection settings, set the abuse.ch Auth-Key | Administrator password |
 
 ## Building from source
 
@@ -243,12 +272,13 @@ Qlam/
 │   ├── src/
 │   │   ├── realtime.rs     # fanotify on-access scanning
 │   │   ├── scanner.rs      # on-demand scans
+│   │   ├── schedule.rs     # scheduled scans
 │   │   ├── guard.rs        # what happens after a detection
 │   │   ├── quarantine.rs   # all-or-nothing, encoded quarantine
 │   │   ├── persistence.rs  # startup-entry checks
 │   │   ├── dbus.rs         # org.maze.Qlam1 API + polkit
 │   │   ├── updater.rs      # signature feeds (qlam-update)
-│   │   └── engine/         # hash list, YARA, ClamAV, known-good checks
+│   │   └── engine/         # hash list, YARA, ClamAV, archives, download origin, known-good checks
 │   ├── rules/              # Qlam's own YARA rules and known-good list
 │   └── dist/               # systemd, D-Bus, polkit, sysusers, tmpfiles, config
 ├── packaging/              # PKGBUILD and install script

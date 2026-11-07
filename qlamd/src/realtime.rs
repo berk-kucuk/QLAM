@@ -60,7 +60,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TrySendError};
 
 use crate::config::{Config, Scope};
-use crate::engine::{Severity, Verdict};
+use crate::engine::{archive, Severity, Verdict};
 use crate::fsutil;
 use crate::guard::{Guard, Trigger};
 use crate::supervise::{fatal, spawn_critical};
@@ -287,7 +287,9 @@ impl Shared {
 
     /// Verdict for an open file, from cache when possible. None on read error
     /// or when the file is over the size limit (treated as allowed).
-    fn verdict(&self, fd: BorrowedFd<'_>, path: &Path, buf: &mut Vec<u8>) -> Option<(Cached, Option<Verdict>)> {
+    /// `archives`: also look inside archives (background scans only; the
+    /// exec path must stay quick, and archives aren't executed).
+    fn verdict(&self, fd: BorrowedFd<'_>, path: &Path, archives: bool, buf: &mut Vec<u8>) -> Option<(Cached, Option<Verdict>)> {
         let st = fsutil::fstat(fd).ok()?;
         if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_size as u64 > self.max_size {
             return None;
@@ -297,7 +299,7 @@ impl Shared {
         if let Some(c) = self.cache.get(&key, generation) {
             return Some((c, None));
         }
-        match self.guard.engine.scan_fd(fd, path, self.max_size, buf) {
+        match self.guard.engine.scan_fd(fd, path, self.max_size, archive_limits(archives), buf) {
             Ok(v) => {
                 let c = (v.severity, v.is_confirmed());
                 self.cache.put(key, generation, c);
@@ -680,7 +682,7 @@ fn exec_worker(s: Arc<Shared>, rx: Receiver<Job>) {
     let mut buf = Vec::new();
     for job in rx {
         s.stats.exec_checked.fetch_add(1, Ordering::Relaxed);
-        let result = s.verdict(job.fd.as_fd(), &job.path, &mut buf);
+        let result = s.verdict(job.fd.as_fd(), &job.path, false, &mut buf);
         // Only exact identifications are ever blocked; pattern matches run
         // and are reported. And not even those while the safety brake is on.
         let confirmed = matches!(result, Some(((Severity::Malicious, true), _)));
@@ -699,6 +701,10 @@ fn exec_worker(s: Arc<Shared>, rx: Receiver<Job>) {
     }
 }
 
+fn archive_limits(on: bool) -> Option<&'static archive::Limits> {
+    on.then_some(&archive::Limits::ON_ACCESS)
+}
+
 /// File name endings of scripts and packages that can run on Linux without
 /// an exec bit or a recognisable header.
 const RUNNABLE_EXTENSIONS: &[&str] = &[
@@ -708,10 +714,11 @@ const RUNNABLE_EXTENSIONS: &[&str] = &[
 
 /// Whether a written file is worth a background scan. Qlam looks for things
 /// that can run on Linux — the hash list and feed rules only cover those —
-/// so images, videos, documents, caches and build artefacts that aren't
-/// executables are skipped without being read. Executed files, tiny files
-/// (cheap, and the EICAR test file is one) and anything with an exec bit,
-/// an ELF or #! header or a runnable extension are scanned.
+/// and for archives and packages they arrive in, so images, videos,
+/// documents, caches and build artefacts that aren't executables are
+/// skipped without being read. Executed files, tiny files (cheap, and the
+/// EICAR test file is one) and anything with an exec bit, an ELF or #!
+/// header, a runnable extension or an archive signature are scanned.
 fn worth_scanning(file: &File, st_mode: u32, size: i64, path: &Path) -> bool {
     if size <= 4096 || st_mode & 0o111 != 0 {
         return true;
@@ -720,9 +727,11 @@ fn worth_scanning(file: &File, st_mode: u32, size: i64, path: &Path) -> bool {
     if ext.is_some_and(|e| RUNNABLE_EXTENSIONS.contains(&e.as_str())) {
         return true;
     }
-    let mut head = [0u8; 4];
+    let mut head = [0u8; archive::DETECT_LEN];
     let n = unsafe { libc::pread(file.as_raw_fd(), head.as_mut_ptr().cast(), head.len(), 0) };
-    n == 4 && (head == *b"\x7fELF" || head.starts_with(b"#!"))
+    let Ok(n) = usize::try_from(n) else { return false };
+    let head = &head[..n];
+    head.starts_with(b"\x7fELF") || head.starts_with(b"#!") || archive::detect(head).is_some()
 }
 
 fn scan_worker(s: Arc<Shared>, rx: Receiver<ScanJob>) {
@@ -736,6 +745,11 @@ fn scan_worker(s: Arc<Shared>, rx: Receiver<ScanJob>) {
             let Ok(st) = fsutil::fstat(file.as_fd()) else { continue };
             if !worth_scanning(&file, st.st_mode, st.st_size, &job.path) {
                 s.stats.writes_skipped.fetch_add(1, Ordering::Relaxed);
+                // Not read, but a download from a known malware URL is
+                // reported whatever it is.
+                if let Ok(Some(v)) = s.guard.engine.scan_origin(file.as_fd(), s.max_size, &mut buf) {
+                    s.guard.handle(file.as_fd(), &job.path, &v, Trigger::Write { pid: job.pid });
+                }
                 continue;
             }
         }
@@ -746,7 +760,7 @@ fn scan_worker(s: Arc<Shared>, rx: Receiver<ScanJob>) {
             s.stats.writes_scanned.fetch_add(1, Ordering::Relaxed);
             Trigger::Write { pid: job.pid }
         };
-        let result = s.verdict(file.as_fd(), &job.path, &mut buf);
+        let result = s.verdict(file.as_fd(), &job.path, !job.exec, &mut buf);
         report(&s, file.as_fd(), &job.path, result, trigger, &mut buf);
         fsutil::trim_buffer(&mut buf);
     }
@@ -765,7 +779,7 @@ fn report(
         Some((_, Some(v))) => v,
         // Cached non-clean verdict: rescan to get the name for the report.
         // Rare (the file was already handled), so the cost doesn't matter.
-        Some((_, None)) => match s.guard.engine.scan_fd(fd, path, s.max_size, buf) {
+        Some((_, None)) => match s.guard.engine.scan_fd(fd, path, s.max_size, archive_limits(matches!(trigger, Trigger::Write { .. })), buf) {
             Ok(v) if v.severity != Severity::Clean => v,
             _ => return,
         },
@@ -1162,6 +1176,11 @@ mod tests {
         assert!(check("install.SH", b"data", 0o644));
         assert!(!check("photo.jpg", b"\xff\xd8\xff\xe0", 0o644));
         assert!(!check("notes.md", b"# Notes", 0o644));
+        // Archives and packages are opened by the scan.
+        assert!(check("release.zip", b"PK\x03\x04", 0o644));
+        assert!(check("bot.tgz", b"\x1f\x8b\x08\x00", 0o644));
+        // ...but not every ar file: a static library isn't a package.
+        assert!(!check("libfoo.a", b"!<arch>\nfoo.o/          ", 0o644));
         // Small files are always cheap enough.
         let p = dir.join("eicar.com");
         std::fs::write(&p, b"X5O!P").unwrap();

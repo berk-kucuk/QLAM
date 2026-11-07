@@ -5,19 +5,25 @@
 //!     a rule explicitly marked `qlam_confirmed` (the EICAR test file). Only
 //!     these may be acted on automatically (exec blocking, and quarantine when
 //!     the admin enables it) — a hash match cannot be a pattern false positive.
-//!   - pattern matches (YARA, ClamAV): reported as warnings for the user to
-//!     decide on, never acted on by themselves.
+//!   - pattern matches (YARA, ClamAV), a download from a URL that URLhaus
+//!     lists, and known samples found *inside* an archive: reported as
+//!     warnings for the user to decide on, never acted on by themselves. (An
+//!     archive is not what gets executed, and malware feeds sometimes list
+//!     legitimate libraries that end up in wheels and jars.)
 //!
 //! Order matters for cost: the allowlist and the hash list are a SHA-256 plus a
-//! lookup, YARA is a pass over the bytes, and ClamAV is a round-trip to clamd.
+//! lookup, the origin check one getxattr, YARA a pass over the bytes, an
+//! archive a pass over each member, and ClamAV a round-trip to clamd.
 
+pub mod archive;
 pub mod clamd;
 pub mod goodware;
 pub mod hashdb;
+pub mod origin;
 pub mod yara;
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::BorrowedFd;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -42,7 +48,8 @@ pub struct Verdict {
     pub confirmed: bool,
     /// Detection name, e.g. "Qlam.Linux.Miner.XMRig". Empty when clean.
     pub name: String,
-    /// Which engine produced it: "hash", "yara", "clamav".
+    /// Which engine produced it: "hash", "yara", "clamav", "urlhaus", or
+    /// "archive:<engine>" for a finding about a file inside an archive.
     pub engine: String,
     pub sha256: String,
 }
@@ -54,6 +61,11 @@ impl Verdict {
 
     fn found(m: Match, engine: &str, sha256: &str) -> Verdict {
         Verdict { severity: m.severity, confirmed: m.confirmed, name: m.name, engine: engine.into(), sha256: sha256.into() }
+    }
+
+    /// Stronger than `other`: higher severity, then confirmed over not.
+    fn beats(&self, other: &Verdict) -> bool {
+        (self.severity, self.confirmed) > (other.severity, other.confirmed)
     }
 
     pub fn is_malicious(&self) -> bool {
@@ -78,9 +90,15 @@ pub struct Match {
 /// file on the system.
 const MIN_HASH_MATCH_SIZE: usize = 64;
 
+/// Text joining a detection name and the archive member it was found in.
+/// The app splits on it to explain the finding.
+pub const IN_ARCHIVE: &str = " in archive member ";
+
 /// Signature sets that are swapped atomically when the feeds change.
 pub struct Signatures {
     pub hashes: hashdb::HashDb,
+    /// URLhaus malware-distribution URLs, keyed by `origin::url_key`.
+    pub urls: hashdb::HashDb,
     pub yara: yara::YaraRules,
     pub known_good: goodware::KnownGood,
     pub generation: u64,
@@ -90,12 +108,16 @@ impl Signatures {
     pub fn load(generation: u64) -> Signatures {
         Signatures {
             hashes: hashdb::HashDb::load_feeds(),
+            urls: hashdb::HashDb::load_file(&crate::config::feeds_dir().join(URL_LIST)),
             yara: yara::YaraRules::load_default(),
             known_good: goodware::KnownGood::load(),
             generation,
         }
     }
 }
+
+/// File name of the URLhaus list in the feeds directory.
+pub const URL_LIST: &str = "urlhaus.qlu";
 
 pub struct Engine {
     sigs: ArcSwap<Signatures>,
@@ -128,17 +150,22 @@ impl Engine {
     }
 
     /// Scan an open file found at `path`. `buf` is a per-worker buffer reused
-    /// between calls so the hot path does not allocate per file.
-    pub fn scan_fd(&self, fd: BorrowedFd<'_>, path: &Path, max_size: u64, buf: &mut Vec<u8>) -> io::Result<Verdict> {
+    /// between calls so the hot path does not allocate per file. With
+    /// `archives`, archives are opened and their members checked too.
+    pub fn scan_fd(
+        &self,
+        fd: BorrowedFd<'_>,
+        path: &Path,
+        max_size: u64,
+        archives: Option<&archive::Limits>,
+        buf: &mut Vec<u8>,
+    ) -> io::Result<Verdict> {
         crate::fsutil::read_from_start(fd, buf, max_size)?;
         let sha256 = hex::encode(Sha256::digest(&buf[..]));
 
         // The user said "I trust this file": nothing overrides that. A
         // per-user decision only covers files that user owns.
-        let owner = {
-            let mut st: libc::stat = unsafe { std::mem::zeroed() };
-            (unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0).then_some(st.st_uid)
-        };
+        let owner = crate::fsutil::fstat(fd).ok().map(|st| st.st_uid);
         if self.store.is_allowlisted_for(owner, &sha256) {
             return Ok(Verdict::clean(sha256));
         }
@@ -155,17 +182,113 @@ impl Engine {
         }
 
         let mut best = Verdict::clean(sha256.clone());
+        if let Some(m) = origin_match(&sigs, fd) {
+            best = Verdict::found(m, "urlhaus", &sha256);
+        }
         if let Some(m) = sigs.yara.scan(buf) {
-            best = Verdict::found(m, "yara", &sha256);
-            if best.is_confirmed() {
-                return Ok(best);
+            let v = Verdict::found(m, "yara", &sha256);
+            if v.is_confirmed() {
+                return Ok(v);
+            }
+            if v.beats(&best) {
+                best = v;
+            }
+        }
+        if let Some(limits) = archives.filter(|_| best.severity < Severity::Malicious) {
+            if archive::detect(buf).is_some() {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Some(v) = self.scan_members(&sigs, buf, &name, owner, limits, &sha256) {
+                    if v.beats(&best) {
+                        best = v;
+                    }
+                }
             }
         }
         if let Some(m) = self.clamd.scan_fd(fd) {
-            if m.severity > best.severity {
-                best = Verdict::found(m, "clamav", &sha256);
+            let v = Verdict::found(m, "clamav", &sha256);
+            if v.beats(&best) {
+                best = v;
             }
         }
         Ok(best)
     }
+
+    /// The strongest finding among the members of the archive in `data`.
+    /// `sha256` is the archive's own: the finding is about the archive file,
+    /// which is what the user can quarantine or trust.
+    fn scan_members(
+        &self,
+        sigs: &Signatures,
+        data: &[u8],
+        name: &str,
+        owner: Option<u32>,
+        limits: &archive::Limits,
+        sha256: &str,
+    ) -> Option<Verdict> {
+        let mut best: Option<(Match, String, &'static str)> = None;
+        let walked = archive::walk(data, name, limits, &mut |member, bytes| {
+            let sha = hex::encode(Sha256::digest(bytes));
+            if sigs.known_good.contains(&sha) || self.store.is_allowlisted_for(owner, &sha) {
+                return archive::Flow::Continue;
+            }
+            if bytes.len() >= MIN_HASH_MATCH_SIZE {
+                if let Some(family) = sigs.hashes.lookup_hex(&sha) {
+                    let m = Match { severity: Severity::Malicious, confirmed: false, name: format!("{family} (known sample)") };
+                    best = Some((m, member.to_string(), "hash"));
+                    return archive::Flow::Stop;
+                }
+            }
+            if let Some(m) = sigs.yara.scan(bytes) {
+                let stronger = best.as_ref().is_none_or(|(b, _, _)| m.severity > b.severity);
+                if stronger {
+                    let stop = m.severity == Severity::Malicious;
+                    best = Some((Match { confirmed: false, ..m }, member.to_string(), "yara"));
+                    if stop {
+                        return archive::Flow::Stop;
+                    }
+                }
+            }
+            archive::Flow::Continue
+        });
+        if walked.incomplete || walked.skipped > 0 {
+            log::debug!("{name}: {} archive members checked, {} skipped, complete: {}", walked.members, walked.skipped, !walked.incomplete);
+        }
+        let (m, member, engine) = best?;
+        Some(Verdict {
+            severity: m.severity,
+            confirmed: false,
+            name: format!("{}{IN_ARCHIVE}{member}", m.name),
+            engine: format!("archive:{engine}"),
+            sha256: sha256.to_string(),
+        })
+    }
+
+    /// For files on-access protection doesn't read (not runnable): only the
+    /// download-origin check, which costs one getxattr. The file is read only
+    /// when its origin matches, for the hash the finding needs.
+    pub fn scan_origin(&self, fd: BorrowedFd<'_>, max_size: u64, buf: &mut Vec<u8>) -> io::Result<Option<Verdict>> {
+        let sigs = self.sigs.load();
+        let Some(m) = origin_match(&sigs, fd) else { return Ok(None) };
+        crate::fsutil::read_from_start(fd, buf, max_size)?;
+        let sha256 = hex::encode(Sha256::digest(&buf[..]));
+        let owner = crate::fsutil::fstat(fd).ok().map(|st| st.st_uid);
+        if self.store.is_allowlisted_for(owner, &sha256) || sigs.known_good.contains(&sha256) {
+            return Ok(None);
+        }
+        Ok(Some(Verdict::found(m, "urlhaus", &sha256)))
+    }
+}
+
+fn origin_match(sigs: &Signatures, fd: BorrowedFd<'_>) -> Option<Match> {
+    if sigs.urls.len() == 0 {
+        return None;
+    }
+    let url = origin::origin_url(fd)?;
+    let tag = sigs.urls.lookup_hex(&origin::url_key(&url)?)?;
+    let name = if tag.is_empty() || tag == "Unknown" {
+        "URLhaus.MalwareDownload".to_string()
+    } else {
+        format!("URLhaus.MalwareDownload.{tag}")
+    };
+    Some(Match { severity: Severity::Malicious, confirmed: false, name })
 }

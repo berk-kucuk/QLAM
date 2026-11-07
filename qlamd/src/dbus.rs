@@ -22,6 +22,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::zvariant::Value;
 use zbus::{fdo, interface, Connection};
 
+use crate::config;
 use crate::daemon::{home_owner, Daemon};
 use crate::guard::Notice;
 use crate::quarantine;
@@ -76,6 +77,18 @@ async fn authorize(conn: &Connection, hdr: &Header<'_>, action: &str) -> fdo::Re
     } else {
         Err(fdo::Error::AccessDenied(format!("not authorized for {action}")))
     }
+}
+
+async fn start_update(conn: &Connection) -> fdo::Result<()> {
+    conn.call_method(
+        Some("org.freedesktop.systemd1"),
+        "/org/freedesktop/systemd1",
+        Some("org.freedesktop.systemd1.Manager"),
+        "StartUnit",
+        &("qlam-update.service", "replace"),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Owner check for an event or quarantine item. Root may act on anything.
@@ -256,16 +269,32 @@ impl Service {
         std::thread::spawn(move || d.set_option(&name, value)).join().map_err(|_| err("internal error"))?.map_err(err)
     }
 
+    /// frequency: "off", "daily" or "weekly"; kind: "quick" or "home".
+    async fn set_schedule(
+        &self,
+        frequency: String,
+        kind: String,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<()> {
+        authorize(conn, &hdr, "org.maze.qlam.configure").await?;
+        self.d.set_schedule(&frequency, &kind).map_err(err)
+    }
+
     async fn update_signatures(&self, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> fdo::Result<()> {
         authorize(conn, &hdr, "org.maze.qlam.update").await?;
-        conn.call_method(
-            Some("org.freedesktop.systemd1"),
-            "/org/freedesktop/systemd1",
-            Some("org.freedesktop.systemd1.Manager"),
-            "StartUnit",
-            &("qlam-update.service", "replace"),
-        )
-        .await?;
+        start_update(conn).await
+    }
+
+    /// Set the abuse.ch Auth-Key the MalwareBazaar feed needs ("" removes
+    /// it), then update with it. The key is never sent back to clients.
+    async fn set_abusech_key(&self, key: String, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> fdo::Result<()> {
+        authorize(conn, &hdr, "org.maze.qlam.configure").await?;
+        let key = key.trim();
+        config::save_abusech_key(key).map_err(err)?;
+        if !key.is_empty() {
+            start_update(conn).await?;
+        }
         Ok(())
     }
 

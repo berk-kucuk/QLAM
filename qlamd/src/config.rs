@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::schedule::{Depth, Frequency};
+
 pub const CONFIG_FILE: &str = "/etc/qlam/qlamd.toml";
 /// Rules and lists shipped with Qlam; QLAM_RULES_DIR overrides it for
 /// development and tests.
@@ -29,6 +31,68 @@ pub fn db_file() -> PathBuf {
 /// Feed directory; QLAM_FEEDS_DIR overrides it independently.
 pub fn feeds_dir() -> PathBuf {
     std::env::var_os("QLAM_FEEDS_DIR").map(PathBuf::from).unwrap_or_else(|| state_dir().join("feeds"))
+}
+
+/// abuse.ch Auth-Key for the MalwareBazaar exports. abuse.ch made the key
+/// mandatory (the keyless export URLs answer 410 Gone since late 2026). It
+/// lives in the state directory, not /etc: the daemon writes it (from the
+/// app, after polkit) and /etc is read-only to it. root:qlam 0640, so the
+/// updater can read it and other users can't.
+pub fn abusech_key_file() -> PathBuf {
+    state_dir().join("abusech.key")
+}
+
+/// Keys are opaque tokens; this only keeps the value safe to put in a URL
+/// path.
+pub fn valid_abusech_key(key: &str) -> bool {
+    (16..=128).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+pub fn abusech_key() -> Option<String> {
+    let key = std::fs::read_to_string(abusech_key_file()).ok()?;
+    let key = key.trim();
+    valid_abusech_key(key).then(|| key.to_string())
+}
+
+/// Store the key, or remove it when `key` is empty.
+pub fn save_abusech_key(key: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = abusech_key_file();
+    if key.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    if !valid_abusech_key(key) {
+        return Err(std::io::Error::other("this doesn't look like an abuse.ch Auth-Key"));
+    }
+    let tmp = path.with_extension("part");
+    let _ = std::fs::remove_file(&tmp);
+    let res = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o640).open(&tmp)?;
+        // The session-bus development instance runs as the user and can't
+        // (and needn't) hand the file to the qlam group.
+        if unsafe { libc::geteuid() } == 0 {
+            let gid = qlam_gid().ok_or_else(|| std::io::Error::other("no qlam group"))?;
+            std::os::unix::fs::fchown(&f, Some(0), Some(gid))?;
+        }
+        f.write_all(key.as_bytes())?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+fn qlam_gid() -> Option<u32> {
+    let grp = unsafe { libc::getgrnam(c"qlam".as_ptr()) };
+    (!grp.is_null()).then(|| unsafe { (*grp).gr_gid })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +124,11 @@ pub struct Config {
     pub exec_workers: usize,
     /// Worker threads for post-write background scans.
     pub background_workers: usize,
+    /// Scheduled scan of every user: "off", "daily" or "weekly".
+    pub scheduled_scan: Frequency,
+    /// What it covers: "quick" (downloads, desktop, startup entries, temp
+    /// folders) or "home" (the whole home folder).
+    pub scheduled_scan_depth: Depth,
 }
 
 impl Default for Config {
@@ -84,6 +153,8 @@ impl Default for Config {
             clamd_socket: "/run/clamav/clamd.ctl".into(),
             exec_workers: 2,
             background_workers: 1,
+            scheduled_scan: Frequency::Weekly,
+            scheduled_scan_depth: Depth::Quick,
         }
     }
 }
