@@ -94,6 +94,10 @@ def headline(ev: dict) -> str:
         return "File moved to quarantine"
     if kind == "persistence":
         return "Unusual startup entry"
+    if kind == "rootkit":
+        return "Signs of a rootkit" if ev.get("severity") == "malicious" else "Unusual system setting"
+    if kind == "behavior":
+        return "A program is behaving like malware" if ev.get("severity") == "malicious" else "Unusual program behaviour"
     if ev.get("engine") == "urlhaus":
         return "Downloaded from a malware site"
     inside = archive_member(ev)
@@ -109,6 +113,24 @@ def explanation(ev: dict) -> str:
     kind = ev.get("kind", "")
     if kind == "safety-pause":
         return ev.get("action", "")
+    if kind in ("behavior", "rootkit"):
+        detail = ev.get("action", "").removeprefix("no changes made: ")
+        proc = ev.get("process") or "A program"
+        if kind == "rootkit":
+            text = ("Qlam found a sign that something is hiding on this computer:\n\n"
+                    f"    {detail}\n\n")
+            text += ("Rootkits hide processes, files and kernel modules from the tools you'd use to "
+                     "find them. If this is confirmed, the safest way out is to back up your files "
+                     "and reinstall the system." if ev.get("severity") == "malicious" else
+                     "Some tools set this up on purpose. If you didn't, it's worth finding out what did.")
+            return text
+        text = f"{proc} {detail}.\n\n"
+        text += ("This is what malware does once it runs. Qlam hasn't stopped or changed anything. "
+                 "If you don't know this program, end it (for example with your system monitor) and run "
+                 "a scan of your home folder." if ev.get("severity") == "malicious" else
+                 "Some legitimate programs do this too, such as installers and developer tools. "
+                 "If you recognise it, mark it as trusted and Qlam won't mention it again.")
+        return text
     if kind == "persistence":
         detail = ev.get("action", "").removeprefix("no changes made: ")
         return (
@@ -142,6 +164,13 @@ def explanation(ev: dict) -> str:
         return text + ("\n\nNothing inside has been unpacked or run. If you don't need this archive, "
                        "moving it to quarantine is the safe choice; if you trust where it came from, "
                        "mark it as trusted.")
+    if name.startswith("Qlam.Heur.ELF (") and name.endswith(")"):
+        traits = name[len("Qlam.Heur.ELF ("):-1].split("; ")
+        listed = "\n".join(f"    • {t}" for t in traits)
+        return ("This program shows several traits that malware tends to have together:\n\n"
+                f"{listed}\n\n"
+                "Each is common enough on its own, and Qlam doesn't know this program as malware, "
+                "so this is only a notice. If you don't know where it came from, don't run it.")
     if ev.get("severity") == "malicious" and ev.get("confirmed"):
         family = name.removesuffix(" (known sample)")
         text = (f"This file is byte-for-byte identical to a known sample of {family}. "

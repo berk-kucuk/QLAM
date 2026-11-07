@@ -32,6 +32,11 @@ clamd_socket = "/run/clamav/clamd.ctl"
 exec_workers = 2
 background_workers = 1
 
+# Watch running programs for what malware does: running from memory or a
+# deleted file, posing as a kernel thread, reverse shells, cryptominers.
+# Only reports; never stops a program.
+behavior_monitor = true
+
 # Scheduled scan of every user's files: "off", "daily" or "weekly". It waits
 # until the computer has been on for 15 minutes, no other scan is running and
 # it is on mains power (unless a whole period overdue).

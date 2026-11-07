@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::Scope;
 use crate::engine::{archive, Severity};
-use crate::guard::{Guard, Notice, Trigger};
+use crate::guard::{Guard, Notice, Observation, Trigger};
 use crate::persistence;
+use crate::rootkit;
 use crate::store::{now, ScanRecord};
 
 /// On-demand scans look at bigger files than on-access does, but each file
@@ -182,6 +183,27 @@ impl Scanner {
             for f in persistence::check_home(&user.home, Some(&user.name)) {
                 if self.guard.report_finding(&f.path, user.uid, f.name, &f.detail).is_some() {
                     prog.suspicious += 1;
+                }
+            }
+            // System-wide signs of a rootkit concern everyone on the
+            // computer, so each user's scan reports them to that user.
+            for f in rootkit::check() {
+                let o = Observation {
+                    path: f.path,
+                    uid: user.uid,
+                    pid: f.pid,
+                    kind: "rootkit",
+                    engine: "rootkit",
+                    name: f.name,
+                    detail: &f.detail,
+                    severity: f.severity,
+                };
+                if self.guard.report_observation(o).is_some() {
+                    if f.severity == "malicious" {
+                        prog.detections += 1;
+                    } else {
+                        prog.suspicious += 1;
+                    }
                 }
             }
         }

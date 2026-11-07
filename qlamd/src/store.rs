@@ -19,6 +19,7 @@ pub struct Event {
     pub id: i64,
     pub ts: i64,
     /// "blocked", "quarantined", "warning", "suspicious", "persistence",
+    /// "behavior", "rootkit",
     /// "safety-pause".
     pub kind: String,
     pub path: String,
@@ -209,7 +210,7 @@ impl Store {
             .query_row(
                 "SELECT COUNT(*) FROM (SELECT DISTINCT path, detection FROM events
                  WHERE (?1 IS NULL OR uid = ?1) AND resolution = ''
-                 AND kind IN ('blocked', 'warning', 'suspicious', 'persistence'))",
+                 AND kind IN ('blocked', 'warning', 'suspicious', 'persistence', 'behavior', 'rootkit'))",
                 params![uid],
                 |r| r.get(0),
             )
@@ -260,6 +261,9 @@ impl Store {
     }
 
     /// Paths of open findings, one per path.
+    /// Paths of open findings about files. Not behaviour and rootkit
+    /// findings: those are about a process or the system, and the "file"
+    /// may never have existed on disk (a memory-only program).
     pub fn open_paths(&self) -> Vec<String> {
         let db = self.conn();
         let Ok(mut stmt) = db.prepare(
@@ -299,7 +303,8 @@ impl Store {
     /// Settle every open finding about `path` as `resolution`.
     pub fn resolve_path(&self, path: &str, resolution: &str) {
         let r = self.conn().execute(
-            "UPDATE events SET resolution = ?1 WHERE resolution = '' AND path = ?2",
+            "UPDATE events SET resolution = ?1 WHERE resolution = '' AND path = ?2
+             AND kind NOT IN ('behavior', 'rootkit')",
             params![resolution, path],
         );
         if let Err(e) = r {

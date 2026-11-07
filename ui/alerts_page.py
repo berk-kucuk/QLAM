@@ -20,7 +20,9 @@ from ui.widgets import (
     Card, Chip, ago, chip_for, explanation, headline, label, level, page_header, short_path, when,
 )
 
-_ACTIONABLE = {"blocked", "warning", "suspicious", "persistence"}
+_ACTIONABLE = {"blocked", "warning", "suspicious", "persistence", "behavior", "rootkit"}
+# Findings about a setting, a process or the system rather than a file's content.
+_NOT_A_FILE = {"persistence", "behavior", "rootkit"}
 _CHIP_TEXT = {"danger": "Malware", "warn": "Warning", "notice": "Notice", "info": "Info"}
 
 
@@ -197,13 +199,16 @@ class AlertsPage(QWidget):
             "gone": "The file no longer exists; nothing to do",
             "cleared": "No longer flagged by the current signatures (it was a false alarm)",
         }.get(ev.get("resolution", ""), "Waiting for your decision" if is_open(ev) else ev.get("action", ""))
-        if is_open(ev) and not exists and ev.get("kind") != "persistence":
+        if is_open(ev) and not exists and ev.get("kind") not in _NOT_A_FILE:
             status = "The file no longer exists"
         vals = {
             "File": ev.get("path", ""),
             "Detection": ev.get("detection", ""),
             "Found by": {"hash": "Known-sample list", "yara": "Pattern rules", "clamav": "ClamAV",
-                         "persistence": "Startup check"}.get(ev.get("engine", ""), ev.get("engine", "")),
+                         "persistence": "Startup check", "behavior": "Behaviour monitor",
+                         "rootkit": "Rootkit check", "urlhaus": "Download origin (URLhaus)",
+                         "archive:hash": "Known-sample list, inside an archive",
+                         "archive:yara": "Pattern rules, inside an archive"}.get(ev.get("engine", ""), ev.get("engine", "")),
             "Seen": f"{when(ev.get('ts'))} ({ago(ev.get('ts'))})",
             "Process": ev.get("process", "") or "—",
             # Zero-width spaces let the 64-character hash wrap.
@@ -217,7 +222,7 @@ class AlertsPage(QWidget):
         self.b_trust.setVisible(can_act)
         self.b_folder.setEnabled(exists)
         self.b_glovebox.setVisible(
-            exists and ev.get("kind") != "persistence" and os.path.isfile(ev.get("path", ""))
+            exists and ev.get("kind") not in _NOT_A_FILE and os.path.isfile(ev.get("path", ""))
             and shutil.which("maze-glovebox") is not None)
 
     # ── Decisions ─────────────────────────────────────────────────────────
@@ -238,7 +243,8 @@ class AlertsPage(QWidget):
         ev = self._selected()
         if not ev:
             return
-        what = "this startup entry" if ev.get("kind") == "persistence" else "this file"
+        what = {"persistence": "this startup entry", "behavior": "this program doing this",
+                "rootkit": "this"}.get(ev.get("kind"), "this file")
         ans = QMessageBox.question(
             self, "Trust this file?",
             f"Qlam will never report {what} again, even if it changes its mind later.\n\n"

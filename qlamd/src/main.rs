@@ -7,7 +7,10 @@
 //!   qlamd update        refresh signature feeds (qlam user, qlam-update.service)
 //!   qlamd scan PATH...  scan paths in the foreground and print findings
 //!                       (development aid; takes no action)
+//!   qlamd check-system  run the rootkit and behaviour checks once and print
+//!                       what they find (as root for the whole system)
 
+mod behavior;
 mod config;
 mod daemon;
 mod dbus;
@@ -17,7 +20,9 @@ mod guard;
 mod logger;
 mod persistence;
 mod quarantine;
+mod procfs;
 mod realtime;
+mod rootkit;
 mod scanner;
 mod schedule;
 mod store;
@@ -35,12 +40,13 @@ fn main() {
         None | Some("daemon") => run_daemon(args.iter().any(|a| a == "--session")),
         Some("update") => updater::run(),
         Some("scan") => scan_foreground(&args[1..]),
+        Some("check-system") => check_system(),
         Some("--version") => {
             println!("qlamd {}", env!("CARGO_PKG_VERSION"));
             0
         }
         Some(other) => {
-            eprintln!("unknown command {other}; use daemon, update or scan");
+            eprintln!("unknown command {other}; use daemon, update, scan or check-system");
             2
         }
     };
@@ -95,6 +101,7 @@ fn run_daemon(session: bool) -> i32 {
     // The development instance can't read other users' homes.
     if !session {
         schedule::spawn(d.clone());
+        behavior::spawn(d.clone());
     }
 
     let _conn = match dbus::serve(d.clone(), rx, session) {
@@ -147,6 +154,23 @@ fn raise_nofile_limit() {
 }
 
 /// Scan paths and print findings. Never quarantines or blocks anything.
+/// Rootkit and behaviour checks once, printed (run as root for the full
+/// picture; as a user, only that user's processes can be inspected).
+fn check_system() -> i32 {
+    let scope = config::Scope::new(&config::Config::load());
+    let mut hits = 0;
+    for f in rootkit::check() {
+        hits += 1;
+        println!("{}\t{}\t{}", f.severity, f.name, f.detail);
+    }
+    for (pid, comm, s) in behavior::check_once(&scope) {
+        hits += 1;
+        println!("{}\t{}\tpid {pid} ({comm}): {}", s.severity, s.name, s.detail);
+    }
+    eprintln!("{hits} findings");
+    if hits > 0 { 1 } else { 0 }
+}
+
 fn scan_foreground(paths: &[String]) -> i32 {
     let store = Arc::new(store::Store::in_memory());
     let engine = engine::Engine::new(&config::Config::default().clamd_socket, store);

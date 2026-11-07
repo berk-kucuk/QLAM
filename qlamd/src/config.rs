@@ -124,6 +124,8 @@ pub struct Config {
     pub exec_workers: usize,
     /// Worker threads for post-write background scans.
     pub background_workers: usize,
+    /// Watch running programs for what malware does (behavior.rs).
+    pub behavior_monitor: bool,
     /// Scheduled scan of every user: "off", "daily" or "weekly".
     pub scheduled_scan: Frequency,
     /// What it covers: "quick" (downloads, desktop, startup entries, temp
@@ -153,6 +155,7 @@ impl Default for Config {
             clamd_socket: "/run/clamav/clamd.ctl".into(),
             exec_workers: 2,
             background_workers: 1,
+            behavior_monitor: true,
             scheduled_scan: Frequency::Weekly,
             scheduled_scan_depth: Depth::Quick,
         }

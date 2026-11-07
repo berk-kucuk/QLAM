@@ -118,7 +118,12 @@ class SettingsPage(QWidget):
         self.t_autoq = _Toggle("Move known malware to quarantine automatically",
                                "Off by default: Qlam tells you and you decide. When on, this applies only "
                                "to exact matches with known malware, never to pattern-based warnings.")
-        for t, key in ((self.t_rt, "realtime"), (self.t_block, "block_exec"), (self.t_autoq, "auto_quarantine")):
+        self.t_behav = _Toggle("Watch running programs",
+                               "Notices programs that act like malware: running from memory or from a deleted "
+                               "file, posing as a system process, remote shells, cryptominers. Only reports; "
+                               "never stops anything.")
+        for t, key in ((self.t_rt, "realtime"), (self.t_block, "block_exec"), (self.t_autoq, "auto_quarantine"),
+                       (self.t_behav, "behavior_monitor")):
             t.box.toggled.connect(lambda on, k=key, box=t.box: self._set_option(k, on, box))
             prot.body.addWidget(t)
 
@@ -199,9 +204,10 @@ class SettingsPage(QWidget):
         self.t_rt.box.setChecked(bool(rt.get("enabled")))
         self.t_block.box.setChecked(bool(rt.get("block_exec")))
         self.t_autoq.box.setChecked(bool(rt.get("auto_quarantine")))
+        self.t_behav.box.setChecked(bool(rt.get("behavior_monitor")))
         self._loading = False
         on = bool(st)
-        for t in (self.t_rt, self.t_block, self.t_autoq):
+        for t in (self.t_rt, self.t_block, self.t_autoq, self.t_behav):
             t.setEnabled(on)
         self.t_block.setEnabled(on and bool(rt.get("enabled")))
         self.b_update.setEnabled(on)

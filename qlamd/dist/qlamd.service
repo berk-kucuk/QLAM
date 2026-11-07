@@ -17,7 +17,9 @@ LimitNOFILE=524288
 
 # Root is needed for fanotify permission events and to read/quarantine
 # files in every user's home, but not much else.
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN
+# CAP_SYS_PTRACE: the behaviour monitor reads other users' /proc/<pid>/exe
+# and fd links (ptrace-read access). Nothing is ever traced or attached to.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_SYS_PTRACE
 NoNewPrivileges=yes
 ProtectSystem=strict
 # "-": skip locations that do not exist on this machine.

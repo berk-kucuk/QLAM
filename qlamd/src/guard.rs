@@ -221,22 +221,39 @@ impl Guard {
     /// entry in a config file. Always a warning; skipped if the user already
     /// said to trust it.
     pub fn report_finding(&self, path: &Path, uid: u32, name: &str, detail: &str) -> Option<Event> {
-        let path_s = path.to_string_lossy().into_owned();
-        if self.store.is_allowlisted_for(Some(uid), &finding_key(&path_s, name)) {
+        self.report_observation(Observation {
+            path: path.to_path_buf(),
+            uid,
+            pid: 0,
+            kind: "persistence",
+            engine: "persistence",
+            name,
+            detail,
+            severity: "suspicious",
+        })
+    }
+
+    /// Record something seen rather than scanned: a startup entry, a
+    /// process's behaviour, a sign of a rootkit. Never acted on; skipped if
+    /// the user already said to trust it.
+    pub fn report_observation(&self, o: Observation<'_>) -> Option<Event> {
+        let path_s = o.path.to_string_lossy().into_owned();
+        if self.store.is_allowlisted_for(Some(o.uid), &finding_key(&path_s, o.name)) {
             return None;
         }
         let mut ev = Event {
             ts: now(),
-            kind: "persistence".into(),
+            kind: o.kind.into(),
             path: path_s,
-            uid,
-            severity: "suspicious".into(),
-            detection: name.into(),
-            engine: "persistence".into(),
-            action: format!("no changes made: {detail}"),
+            uid: o.uid,
+            severity: o.severity.into(),
+            detection: o.name.into(),
+            engine: o.engine.into(),
+            process: fsutil::process_label(o.pid),
+            action: format!("no changes made: {}", o.detail),
             ..Default::default()
         };
-        log::warn!("{}: {} ({detail})", ev.path, ev.detection);
+        log::warn!("{}: {} ({})", ev.path, ev.detection, o.detail);
         ev.id = self.store.add_event(&ev);
         self.notify(Notice::Threat(ev.clone()));
         Some(ev)
@@ -297,6 +314,21 @@ impl Guard {
         }
         r.insert(sha256.to_string(), generation) != Some(generation)
     }
+}
+
+/// Something seen rather than scanned; see `Guard::report_observation`.
+pub struct Observation<'a> {
+    pub path: std::path::PathBuf,
+    pub uid: u32,
+    /// The process it's about, or 0.
+    pub pid: i32,
+    /// Event kind: "persistence", "behavior" or "rootkit".
+    pub kind: &'a str,
+    pub engine: &'a str,
+    pub name: &'a str,
+    pub detail: &'a str,
+    /// "malicious" or "suspicious".
+    pub severity: &'a str,
 }
 
 /// Allowlist key for a content-less finding.

@@ -52,6 +52,18 @@ download and run.
 - **Archives and packages** — zip (and jar, wheel), tar, `.deb` and `.rpm`
   packages, and gzip/xz/bzip2/zstd files are opened and every file inside is
   checked, nested archives included. Maintainer scripts of packages too.
+- **Behaviour monitor** — running programs are watched for what malware
+  does: running from memory or from a file deleted after it started, from a
+  hidden temporary folder, posing as a kernel thread, a shell wired to an
+  internet connection (reverse shell), a program connected to a mining pool
+  and burning CPU. Reports only; never stops a program.
+- **Rootkit checks** — with every quick, home and scheduled scan: libraries
+  forced into every program (`/etc/ld.so.preload`), processes hidden from the
+  process list, kernel modules hidden from the module list.
+- **Heuristics** — Linux executables are scored on traits malware shares
+  (packed, writable+executable code, a kernel thread's name, history wiping,
+  disabling the firewall...). Only several traits together, one of them
+  strong, make a (suspicious) finding.
 - **Download origin** — a file downloaded from a URL that URLhaus lists as
   spreading malware is reported whatever its content (Chromium-based
   browsers, `wget --xattr` and `curl --xattr` record where a download came
@@ -80,6 +92,9 @@ download and run.
 | Malware URLs | Downloads whose recorded origin is a [URLhaus](https://urlhaus.abuse.ch) malware URL (last 30 days) | No — warnings only |
 | Qlam rules (YARA) | Linux miners and their configs (XMRig, Kinsing, TeamTNT), botnets (Mirai, Gafgyt, Mozi, Tsunami, XorDDoS) and their loaders, backdoors (BPFDoor, SSH key injection, Perl ShellBot), rootkits (`LD_PRELOAD`, kernel modules), cloud credential stealers, ransomware, reverse shells, webshells, offensive tools (Sliver, mimipenguin) | No — warnings only |
 | YARA Forge rules | Community rules for Linux executables ([YARA Forge](https://github.com/YARAHQ/yara-forge)), counted only on ELF files | No — warnings only |
+| Heuristics (YARA) | Executables with several malware traits together (`rules/qlam-heuristics.yar`) | No — notices only |
+| Behaviour monitor | Running programs acting like malware (see above) | No — warnings only |
+| Rootkit checks | Hidden processes and kernel modules, `ld.so.preload` | No — warnings only |
 | ClamAV (optional) | ClamAV signatures, through a running `clamav-daemon` | No — warnings only |
 
 Archives are opened for every engine but ClamAV (which opens them itself).
@@ -100,6 +115,17 @@ Guards against false alarms:
   Script rules only apply to real scripts (`#!`).
 - A safety brake pauses automatic actions if they suddenly spike, which is
   what a faulty signature update would look like.
+- Heuristics only count traits that mean something for the file at hand:
+  packing and self-modifying code only in programs (anti-cheat and DRM
+  libraries are packed on purpose), text traits only in files under 8 MB.
+  They were checked against every ELF on a desktop (system, firmware,
+  Steam and its runtimes, Go and Rust toolchains) without a finding.
+- The behaviour monitor ignores what's normal: programs replaced by an
+  update while running, AppImages (which run from `/tmp/.mount_*`),
+  container runtimes re-executing from memory, connections inside the local
+  network. It costs one pass over `/proc` every 10 seconds; it needs
+  `CAP_SYS_PTRACE` to read other users' `/proc/<pid>/exe`, and never
+  attaches to or stops a process.
 
 Signatures are refreshed daily by `qlam-update.service`, which runs as an
 unprivileged user in a sandbox.
@@ -273,6 +299,9 @@ Qlam/
 │   │   ├── realtime.rs     # fanotify on-access scanning
 │   │   ├── scanner.rs      # on-demand scans
 │   │   ├── schedule.rs     # scheduled scans
+│   │   ├── behavior.rs     # behaviour monitor (running programs)
+│   │   ├── rootkit.rs      # rootkit checks
+│   │   ├── procfs.rs       # reading processes from /proc
 │   │   ├── guard.rs        # what happens after a detection
 │   │   ├── quarantine.rs   # all-or-nothing, encoded quarantine
 │   │   ├── persistence.rs  # startup-entry checks

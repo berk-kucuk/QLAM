@@ -1,7 +1,7 @@
 # Maintainer: Berk Küçük <berkkucukk@proton.me>
 
 pkgname=qlam
-pkgver=2.1.0
+pkgver=2.2.0
 pkgrel=1
 pkgdesc="Warn-first antivirus for Linux: on-access protection for user files, with a desktop app — for Maze Linux"
 arch=('x86_64')
@@ -58,7 +58,7 @@ package() {
 
     # Daemon, bundled rules and system integration
     install -Dm755 qlamd/target/release/qlamd "$pkgdir/usr/lib/qlam/qlamd"
-    install -Dm644 -t "$pkgdir/usr/share/qlam/rules" qlamd/rules/qlam-linux.yar qlamd/rules/known-good.txt
+    install -Dm644 -t "$pkgdir/usr/share/qlam/rules" qlamd/rules/qlam-linux.yar qlamd/rules/qlam-heuristics.yar qlamd/rules/known-good.txt
     install -Dm644 "$d/qlamd.toml"            "$pkgdir/etc/qlam/qlamd.toml"
     install -Dm644 "$d/qlamd.service"         "$pkgdir/usr/lib/systemd/system/qlamd.service"
     install -Dm644 "$d/qlam-update.service"   "$pkgdir/usr/lib/systemd/system/qlam-update.service"

@@ -27,7 +27,7 @@ pub struct Daemon {
 }
 
 /// Runtime overrides persisted in the settings table.
-const BOOL_SETTINGS: &[&str] = &["realtime", "block_exec", "auto_quarantine"];
+const BOOL_SETTINGS: &[&str] = &["realtime", "block_exec", "auto_quarantine", "behavior_monitor"];
 
 impl Daemon {
     pub fn new(mut cfg: Config, guard: Arc<Guard>, session: bool) -> Arc<Daemon> {
@@ -105,6 +105,8 @@ impl Daemon {
                 self.guard.auto_quarantine.store(value, Ordering::Relaxed);
                 self.guard.notify(Notice::StatusChanged);
             }
+            // The monitor reads the setting on every pass.
+            "behavior_monitor" => self.guard.notify(Notice::StatusChanged),
             _ => self.apply_realtime(),
         }
         Ok(())
@@ -172,6 +174,7 @@ impl Daemon {
                 "error": *self.realtime_error.lock().unwrap_or_else(|p| p.into_inner()),
                 "block_exec": cfg.block_exec,
                 "auto_quarantine": cfg.auto_quarantine,
+                "behavior_monitor": cfg.behavior_monitor && !self.session,
                 "actions_paused": self.guard.actions_paused(),
                 "stats": stats,
             },
@@ -279,6 +282,7 @@ fn set_cfg_bool(cfg: &mut Config, key: &str, v: bool) {
         "realtime" => cfg.realtime = v,
         "block_exec" => cfg.block_exec = v,
         "auto_quarantine" => cfg.auto_quarantine = v,
+        "behavior_monitor" => cfg.behavior_monitor = v,
         _ => {}
     }
 }
