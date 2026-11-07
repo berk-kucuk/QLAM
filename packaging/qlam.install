@@ -5,6 +5,8 @@ _enable_hint() {
     and fetch the malware signatures once (a few minutes, ~250 MB download
     the first time):
       sudo systemctl start qlam-update.service
+    The known-malware lists (abuse.ch) need a free Auth-Key: get one at
+    https://auth.abuse.ch/ and paste it in Qlam > Settings > Signatures.
 MSG
 }
 
@@ -21,7 +23,17 @@ post_upgrade() {
 MSG
         _enable_hint
     fi
-    # Pick up the new binary and rules.
+    if [ "$(vercmp "$2" 2.1.0)" -lt 0 ]; then
+        cat <<'MSG'
+==> abuse.ch now requires a free Auth-Key for the known-malware lists
+    (MalwareBazaar, ThreatFox, URLhaus). Get one at https://auth.abuse.ch/
+    and paste it in Qlam > Settings > Signatures.
+MSG
+    fi
+    # Pick up the new binary, rules and unit. pacman's own daemon-reload hook
+    # runs after this script, so reload here, or the restart would use the
+    # old unit (2.2.0 added a capability the behaviour monitor needs).
+    systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl try-restart qlamd.service >/dev/null 2>&1 || true
 }
 
