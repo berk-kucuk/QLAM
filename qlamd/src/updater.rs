@@ -248,6 +248,7 @@ fn update_list(agent: &ureq::Agent, feed: &AbuseFeed, dir: &Path, st: &mut ListS
     let mut builder = Builder::default();
 
     let full = feed.full.filter(|_| !target.exists() || st.filter != feed.filter_version || now() - st.full_at > FULL_EVERY);
+    let mut have_full = false;
     if let Some(file) = full {
         log::info!("{}: downloading full export", feed.name);
         let tmp = dir.join(format!(".{}.zip.part", feed.list));
@@ -261,9 +262,27 @@ fn update_list(agent: &ureq::Agent, feed: &AbuseFeed, dir: &Path, st: &mut ListS
             parse_csv(BufReader::new(entry.take(8 * 1024 * 1024 * 1024)), feed.row, &mut builder)
         });
         let _ = std::fs::remove_file(&tmp);
-        res?;
-        st.full_at = now();
-    } else {
+        match res {
+            Ok(()) => {
+                st.full_at = now();
+                have_full = true;
+            }
+            Err(e) if is_auth_denied(&e) || !target.exists() => return Err(e),
+            // The full dump is big and its download can break off. The list
+            // there is still good: bring it up to date with the small recent
+            // export now, and try the full dump again next time (full_at is
+            // left as it was).
+            Err(e) => {
+                log::warn!(
+                    "{}: full export failed ({}); adding the recent export to the current list instead",
+                    feed.name,
+                    e.to_string().replace(key, "<auth-key>")
+                );
+                builder = Builder::default();
+            }
+        }
+    }
+    if !have_full {
         if feed.full.is_some() {
             builder.read_file(&target)?;
         }
@@ -527,12 +546,66 @@ fn get(agent: &ureq::Agent, url: &str, limit: u64) -> io::Result<Vec<u8>> {
     resp.body_mut().with_config().limit(limit).read_to_vec().map_err(io::Error::other)
 }
 
+/// Download `url` to `dest`. A connection that breaks off is resumed where
+/// it stopped (HTTP Range), up to DOWNLOAD_TRIES times: the full exports are
+/// hundreds of megabytes, and starting over each time may never finish.
 fn download_to(agent: &ureq::Agent, url: &str, dest: &Path, limit: u64) -> io::Result<()> {
-    let resp = agent.get(url).call().map_err(io::Error::other)?;
-    let mut reader = resp.into_body().into_with_config().limit(limit).reader();
+    use std::io::{Seek, SeekFrom};
+    const DOWNLOAD_TRIES: u64 = 5;
     let mut f = File::create(dest)?;
-    io::copy(&mut reader, &mut f)?;
-    f.sync_all()
+    let mut have: u64 = 0;
+    let mut last = io::Error::other("download failed");
+    for attempt in 0..DOWNLOAD_TRIES {
+        if attempt > 0 {
+            log::info!("download broke off at {} MB ({last}); resuming, attempt {}/{DOWNLOAD_TRIES}", have >> 20, attempt + 1);
+            std::thread::sleep(Duration::from_secs(5 * attempt));
+        }
+        let mut req = agent.get(url);
+        if have > 0 {
+            req = req.header("Range", format!("bytes={have}-"));
+        }
+        let resp = match req.call() {
+            Ok(r) => r,
+            // An answer from the server (401, 404, 410...) won't change by
+            // asking again.
+            Err(e @ ureq::Error::StatusCode(416)) if have > 0 => {
+                log::debug!("{e}: already complete");
+                break;
+            }
+            Err(e @ ureq::Error::StatusCode(_)) => return Err(io::Error::other(e)),
+            Err(e) => {
+                last = io::Error::other(e);
+                continue;
+            }
+        };
+        if have > 0 && resp.status().as_u16() != 206 {
+            // The server ignored the range and sends everything again.
+            have = 0;
+            f.set_len(0)?;
+            f.seek(SeekFrom::Start(0))?;
+        }
+        let mut reader = resp.into_body().into_with_config().limit(limit.saturating_sub(have)).reader();
+        let mut buf = vec![0u8; 256 * 1024];
+        let done = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    f.write_all(&buf[..n])?;
+                    have += n as u64;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => break Err(e),
+            }
+        };
+        match done {
+            Ok(()) => return f.sync_all(),
+            Err(e) => last = e,
+        }
+    }
+    // Out of attempts, or the server says there's nothing left to send
+    // (416). Only whole if the zip's directory at its end is there.
+    f.sync_all()?;
+    if have > 0 && zip::ZipArchive::new(&f).is_ok() { Ok(()) } else { Err(last) }
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
@@ -623,6 +696,61 @@ mod tests {
         assert_eq!(db.len(), 2);
         assert_eq!(db.lookup_hex(&url_key("http://1.2.3.4:8080/bins/mozi.m").unwrap()), Some("Mozi"));
         assert_eq!(db.lookup_hex(&url_key("https://example.org/x.sh").unwrap()), Some(""));
+    }
+
+    /// A server that cuts the first response off halfway, like the full
+    /// export download did (2026-11-07), then honours the Range request.
+    #[test]
+    fn broken_downloads_resume() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let body: Vec<u8> = {
+            let mut w = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+            w.start_file("full.csv", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+            w.write_all(&vec![b'x'; 300_000]).unwrap();
+            w.finish().unwrap().into_inner()
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = body.clone();
+        let server = std::thread::spawn(move || {
+            let mut ranges = Vec::new();
+            for (n, conn) in listener.incoming().take(2).enumerate() {
+                let mut conn = conn.unwrap();
+                let mut from = 0usize;
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        from = v.trim().trim_end_matches('-').parse().unwrap();
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                ranges.push(from);
+                let rest = &served[from..];
+                if n == 0 {
+                    // Promise everything, send half, hang up.
+                    write!(conn, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", rest.len()).unwrap();
+                    conn.write_all(&rest[..rest.len() / 2]).unwrap();
+                } else {
+                    write!(conn, "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\n\r\n", rest.len()).unwrap();
+                    conn.write_all(rest).unwrap();
+                }
+            }
+            ranges
+        });
+        let agent: ureq::Agent = ureq::Agent::config_builder().build().into();
+        let dest = std::env::temp_dir().join(format!("qlam-dl-{}.zip", std::process::id()));
+        download_to(&agent, &format!("http://127.0.0.1:{port}/full.csv.zip"), &dest, 10 << 20).unwrap();
+        let ranges = server.join().unwrap();
+        assert_eq!(ranges[0], 0);
+        assert_eq!(ranges[1], body.len() / 2, "second request resumes where the first stopped");
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        let _ = std::fs::remove_file(dest);
     }
 
     #[test]
