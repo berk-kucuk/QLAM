@@ -4,14 +4,14 @@ from __future__ import annotations
 import time
 
 import qtawesome as qta
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
     QVBoxLayout, QWidget,
 )
 
 from ui.theme import theme
-from ui.widgets import Card, Chip, ago, chip_for, headline, label, page_header, short_path, update_text
+from ui.widgets import Card, Chip, ago, chip_for, headline, label, page_header, short_path
 
 
 class _Component(Card):
@@ -32,6 +32,7 @@ class _Component(Card):
         self.body.addLayout(top)
         self.value = label("—", "StatValue")
         self.detail = label("", "Muted", wrap=True)
+        self.detail.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.body.addWidget(self.value)
         self.body.addWidget(self.detail)
         self.body.addStretch(1)
@@ -42,6 +43,19 @@ class _Component(Card):
 
     def retint(self):
         self.icon.setPixmap(qta.icon(self._icon_name, color=theme.p["text_mid"]).pixmap(QSize(16, 16)))
+        self._fix_detail_height()
+
+    def _fix_detail_height(self):
+        """The detail text always gets room for three lines, whatever it says,
+        so the cards keep their size as the text changes (an update's
+        progress changes it every few seconds)."""
+        self.detail.ensurePolished()
+        self.detail.setFixedHeight(self.detail.fontMetrics().lineSpacing() * 3 + 2)
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() in (QEvent.Type.StyleChange, QEvent.Type.FontChange):
+            self._fix_detail_height()
 
 
 class OverviewPage(QWidget):
@@ -223,7 +237,14 @@ class OverviewPage(QWidget):
         stale = not updated or (time.time() - updated) > 3 * 86400
         self.sigs.value.setText(f"{hashes:,}")
         extra = " · ClamAV on" if eng.get("clamav") else ""
-        when_line = f"updating — {update_text(st['update'])}" if st.get("update") else f"updated {ago(updated)}"
+        upd = st.get("update")
+        if upd:
+            mb = int(upd.get("bytes", 0)) >> 20
+            when_line = f"updating {upd.get('feed') or ''}…" + (f" {mb} MB" if mb else "")
+        else:
+            when_line = f"updated {ago(updated)}"
+        self.update_btn.setEnabled(not upd)
+        self.update_btn.setText("Updating…" if upd else "Update now")
         self.sigs.detail.setText(f"known malware samples · {rules:,} rules{extra}\n{when_line}")
         needs_key = not st.get("abusech_key_set") or feeds.get("abusech_key") == "rejected"
         if st.get("update"):
