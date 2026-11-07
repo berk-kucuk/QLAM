@@ -290,8 +290,12 @@ rule Qlam_Linux_Bot_Loader_Script
         $chmod = /chmod\s+(777|\+x|755)/
     condition:
         // These loaders often have no #! line, so it's the repetition that
-        // marks them: three or more architecture downloads in a small file.
-        filesize < 64KB and not is_elf and #dl >= 3 and $chmod
+        // marks them: three or more architecture downloads in a small file
+        // that starts with them. Real ones are a few KB of nothing else;
+        // source code and notes that quote such lines (Qlam's own tests
+        // were flagged inside its source tarball, 2026-11-08) are bigger
+        // and start with something else.
+        filesize < 8KB and not is_elf and #dl >= 3 and $chmod and @dl[1] < 512
 }
 
 // ── Cryptojacking and cloud attacks ─────────────────────────────────────

