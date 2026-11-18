@@ -54,7 +54,7 @@ install_system_deps() {
                 polkit mesa-libGL xcb-util-cursor 2>/dev/null \
                 || warn "Some packages may already be installed."
             ;;
-        *suse*|*opensuse*)
+        *suse*)   # also matches opensuse
             info "Installing system packages via zypper..."
             sudo zypper install -y python3 python3-pip clamav polkit \
                 libGL1 libxcb-cursor0 2>/dev/null \

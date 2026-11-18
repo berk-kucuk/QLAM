@@ -686,7 +686,8 @@ fn exec_worker(s: Arc<Shared>, rx: Receiver<Job>) {
         // Only exact identifications are ever blocked; pattern matches run
         // and are reported. And not even those while the safety brake is on.
         let confirmed = matches!(result, Some(((Severity::Malicious, true), _)));
-        let deny = confirmed && s.block_exec && s.guard.may_act();
+        let deny = confirmed && s.block_exec && s.guard.may_act()
+            && !fsutil::is_system_file(job.fd.as_fd(), &job.path);
         // Answer first; reporting can take a while and the process (or the
         // user waiting on it) shouldn't.
         let answered = s.answer(job.ticket, !deny);

@@ -131,6 +131,13 @@ pub struct Config {
     /// What it covers: "quick" (downloads, desktop, startup entries, temp
     /// folders) or "home" (the whole home folder).
     pub scheduled_scan_depth: Depth,
+    /// Where signature updates go through (audit QL3): "" for direct, or an
+    /// HTTP CONNECT proxy such as Tor's HTTPTunnelPort
+    /// ("http://127.0.0.1:9080" with `HTTPTunnelPort 9080` in torrc), so
+    /// abuse.ch and GitHub do not learn which machines run Qlam and when.
+    /// A proxy that is set but unusable stops the update; it never falls
+    /// back to a direct connection.
+    pub update_proxy: String,
 }
 
 impl Default for Config {
@@ -158,6 +165,7 @@ impl Default for Config {
             behavior_monitor: true,
             scheduled_scan: Frequency::Weekly,
             scheduled_scan_depth: Depth::Quick,
+            update_proxy: String::new(),
         }
     }
 }

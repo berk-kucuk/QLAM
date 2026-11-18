@@ -40,7 +40,10 @@ use crate::engine::yara::{check_source, select_feed_rules};
 use crate::engine::URL_LIST;
 use crate::store::now;
 
-const UA: &str = concat!("qlam/", env!("CARGO_PKG_VERSION"), " (+https://github.com/berk-kucuk/QLAM)");
+// A common browser's User-Agent, not "qlam/<version> (+url)": that told every
+// feed server — and anyone watching — which machine runs Qlam and which
+// version (audit QL3).
+const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
 const FULL_EVERY: i64 = 30 * 24 * 3600;
 
@@ -241,13 +244,27 @@ pub fn run() -> i32 {
     if state.errors.is_empty() { 0 } else { 2 }
 }
 
-fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+fn agent() -> io::Result<ureq::Agent> {
+    agent_with(&crate::config::Config::load().update_proxy)
+}
+
+/// The HTTP agent, through `proxy` when one is set (see Config::update_proxy).
+fn agent_with(proxy: &str) -> io::Result<ureq::Agent> {
+    let proxy = proxy.trim();
+    let mut b = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15 * 60)))
         .user_agent(UA)
-        .https_only(true)
-        .build()
-        .into()
+        .https_only(true);
+    if !proxy.is_empty() {
+        if !proxy.starts_with("http://") {
+            return Err(io::Error::other(format!(
+                "update_proxy must be an http:// CONNECT proxy (e.g. Tor's HTTPTunnelPort), not {proxy}")));
+        }
+        let p = ureq::Proxy::new(proxy)
+            .map_err(|e| io::Error::other(format!("update_proxy {proxy}: {e}")))?;
+        b = b.proxy(Some(p));
+    }
+    Ok(b.build().into())
 }
 
 // ── abuse.ch ─────────────────────────────────────────────────────────────
@@ -261,7 +278,14 @@ fn update_abusech(dir: &Path, state: &mut FeedState) {
         return;
     };
     state.abusech_key = "ok".into();
-    let agent = agent();
+    let agent = match agent() {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("abuse.ch: {e}");
+            state.errors.push(format!("abuse.ch: {e}"));
+            return;
+        }
+    };
     for feed in ABUSE_FEEDS {
         match update_list(&agent, feed, dir, state.list(feed.id), &key) {
             Ok(()) => {}
@@ -521,7 +545,7 @@ struct Asset {
 
 fn update_yara_forge(dir: &Path, state: &mut FeedState) -> io::Result<()> {
     progress("YARA Forge", "rules");
-    let agent = agent();
+    let agent = agent()?;
     let target = dir.join(FORGE_FILE);
     let body = get(&agent, FORGE_API, 1024 * 1024)?;
     let release: Release = serde_json::from_slice(&body).map_err(io::Error::other)?;
@@ -838,5 +862,44 @@ mod tests {
         assert_eq!((kept, dropped), (2, 3));
         assert!(out.contains("good2") && !out.contains("Eicar") && !out.contains("nosuchthing"));
         assert!(out.contains("good2") && !out.contains("nosuchthing") && !out.contains("Socat"));
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    #[test]
+    fn only_http_connect_proxies_are_accepted() {
+        assert!(agent_with("").is_ok());
+        assert!(agent_with("http://127.0.0.1:9080").is_ok());
+        assert!(agent_with("socks5://127.0.0.1:9050").is_err());
+        assert!(agent_with("ftp://x").is_err());
+    }
+
+    #[test]
+    fn updates_go_through_the_proxy_and_say_nothing_about_qlam() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut lines = Vec::new();
+            for line in BufReader::new(s).lines() {
+                let line = line.unwrap_or_default();
+                if line.is_empty() {
+                    break;
+                }
+                lines.push(line);
+            }
+            lines // dropping the stream refuses the tunnel
+        });
+        let agent = agent_with(&format!("http://{addr}")).unwrap();
+        assert!(agent.get("https://feeds.example.invalid/x").call().is_err());
+        let lines = seen.join().unwrap();
+        assert!(lines[0].starts_with("CONNECT feeds.example.invalid:443"), "{lines:?}");
+        let text = lines.join("\n").to_lowercase();
+        assert!(!text.contains("qlam"), "the request names Qlam: {lines:?}");
     }
 }

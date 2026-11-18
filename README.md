@@ -238,6 +238,12 @@ Most settings are in the app (**Settings**). System-wide defaults live in
 | `max_file_size_mb` | `50` | Larger files are not scanned on access |
 | `scope` | `/home`, `/root`, `/tmp`, `/var/tmp`, `/dev/shm`, `/run/user`, `/run/media`, `/media`, `/mnt` | Watched locations |
 | `exclude` | `/var/lib/qlam` | Path prefixes never scanned on access |
+| `update_proxy` | `""` | Fetch signature updates through an HTTP CONNECT proxy, e.g. Tor's `HTTPTunnelPort` (`http://127.0.0.1:9080`). Set but unusable, the update stops instead of going direct |
+
+Root-owned files under `/usr` in root-only directories are never blocked or
+quarantined automatically, only reported: a bad or poisoned signature update
+naming a system binary would otherwise stop it running everywhere, and an
+attacker able to put a file there could switch Qlam off anyway.
 
 Actions that change something ask polkit:
 

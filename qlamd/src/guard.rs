@@ -181,7 +181,9 @@ impl Guard {
         if blocked {
             action.push("execution blocked".to_string());
         }
-        let auto_q = verdict.is_confirmed() && self.auto_quarantine.load(Ordering::Relaxed) && self.may_act();
+        let system_file = fsutil::is_system_file(fd, path);
+        let auto_q = verdict.is_confirmed() && self.auto_quarantine.load(Ordering::Relaxed)
+            && self.may_act() && !system_file;
         if auto_q {
             self.record_action();
             match quarantine::quarantine(&self.store, fd, path, verdict, &verdict.sha256) {
@@ -196,6 +198,10 @@ impl Guard {
                 }
             }
         } else {
+            if system_file && verdict.is_confirmed() {
+                action.push("a root-owned system file: never blocked or quarantined automatically \
+                             (a wrong signature update is the likelier cause)".into());
+            }
             action.push("no changes made; review in Qlam".into());
             ev.kind = if blocked {
                 "blocked"

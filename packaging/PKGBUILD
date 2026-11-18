@@ -2,9 +2,9 @@
 
 pkgname=qlam
 pkgver=2.2.4
-pkgrel=1
+pkgrel=2
 pkgdesc="Warn-first antivirus for Linux: on-access protection for user files, with a desktop app — for Maze Linux"
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 url="https://github.com/berk-kucuk/QLAM"
 license=('MIT')
 # Python libraries (PyQt6, qtawesome) come from maze-python, the shared Maze
